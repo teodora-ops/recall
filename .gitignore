@@ -1,0 +1,10 @@
+.env
+.cache/
+
+# Internal working notes: infrastructure identifiers, timeline, strategy.
+# Stays local — the repo is public.
+CLAUDE.md
+
+__pycache__/
+*.pyc
+node_modules/
