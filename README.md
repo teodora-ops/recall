@@ -86,7 +86,7 @@ from `.env`.
 with Bedrock access in `eu-west-2`.
 
 ```bash
-git clone https://github.com/<owner>/recall.git
+git clone https://github.com/teodora-ops/recall.git
 cd recall
 pip install "psycopg[binary]" boto3 python-dotenv
 ```
