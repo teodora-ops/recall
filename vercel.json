@@ -1,14 +1,8 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": null,
-  "outputDirectory": "web",
   "functions": {
-    "web/api/*.py": {
-      "runtime": "python3.12",
+    "api/*.py": {
       "maxDuration": 30
     }
-  },
-  "rewrites": [
-    { "source": "/api/(.*)", "destination": "/web/api/$1" }
-  ]
+  }
 }

@@ -15,10 +15,9 @@ import sys
 import time
 from http.server import BaseHTTPRequestHandler
 
-# The repo root is one level up from web/; import db.py rather than
-# duplicating the connection logic in the serverless runtime.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__)))))
+# api/ sits at the repo root, so the root is one level up. Import db.py
+# rather than duplicating connection logic in the serverless runtime.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 class handler(BaseHTTPRequestHandler):
