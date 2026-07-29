@@ -1,0 +1,20 @@
+[project]
+name = "recall"
+version = "0.1.0"
+description = "Shared agentic memory layer on CockroachDB"
+requires-python = ">=3.9"
+
+# Declared here as well as in requirements.txt because Vercel's Python
+# runtime resolves dependencies from pyproject.toml when one is present.
+# Only what the deployed functions actually import — boto3 joins this list
+# when the UI starts running agents, not before.
+dependencies = [
+    "psycopg[binary]==3.3.4",
+    "python-dotenv==1.2.2",
+]
+
+# Vercel CLI 58.x no longer auto-discovers per-file handlers; it wants one
+# explicit entrypoint. `handler` is the BaseHTTPRequestHandler subclass in
+# api/health.py, which is the form the build error itself suggested.
+[tool.vercel]
+entrypoint = "api.health:handler"
