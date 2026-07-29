@@ -1,0 +1,10 @@
+# The CA certificate must survive checkout byte-for-byte. Line-ending
+# translation on a PEM file is the kind of thing that works on the machine
+# that committed it and fails on the Linux builder that deploys it.
+certs/*.crt -text
+
+# Keep shell-adjacent and config files LF so they behave the same on the
+# Vercel builder as they do locally.
+*.sql   text eol=lf
+*.py    text eol=lf
+*.json  text eol=lf

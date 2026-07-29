@@ -1,0 +1,10 @@
+# Versions pinned to what the Evidence in README.md was actually produced with,
+# on Python 3.14 / Windows, against CockroachDB v26.2.1.
+
+# The [binary] extra ships libpq, so there is no local Postgres install to do.
+psycopg[binary]==3.3.4
+
+# Bedrock: Titan v2 embeddings and Nova Pro via the Converse API.
+boto3==1.43.57
+
+python-dotenv==1.2.2

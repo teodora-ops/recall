@@ -40,14 +40,14 @@ database. They get protected ahead of everything else.
 
 ```
    email ─┐
-whatsapp ─┼─→  agent (AWS Lambda)  ─→  Bedrock Nova Pro      (reasoning)
+whatsapp ─┼─→  agent (Python)  ─────→  Bedrock Nova Pro      (reasoning)
  webchat ─┘          │                 Bedrock Titan v2      (embeddings, 1024d)
-                     │
+                     │                 S3                    (case artifacts)
                      ↓
               CockroachDB Cloud  ── cases + C-SPANN vector index
               (eu-west-2, v26.2.1)   decisions + actions  [to come]
                      │
-                     ├─→  AS OF SYSTEM TIME  ──→  replay UI
+                     ├─→  AS OF SYSTEM TIME  ──→  replay UI (Vercel)
                      └─→  managed MCP server (read-only)  ──→  analyst access
 ```
 
@@ -57,9 +57,16 @@ whatsapp ─┼─→  agent (AWS Lambda)  ─→  Bedrock Nova Pro      (reason
 | Region | eu-west-2 (London), everything |
 | Reasoning | Amazon Bedrock, Nova Pro, via the Converse API |
 | Embeddings | Amazon Bedrock, Titan Text Embeddings v2, 1024 dims |
-| Artifacts | S3 |
-| Execution | AWS Lambda |
+| Artifacts | S3 — case bodies; vectors and pointers stay in CockroachDB |
+| Agent execution | Python, run from CLI and from the deployed app |
+| Deployed demo | Vercel serverless functions + static frontend |
 | Analyst access | CockroachDB managed MCP server, read-only |
+
+Agent execution is plain Python rather than Lambda. The IAM machine user this
+project runs under is scoped to Bedrock and S3 only, and on a two-week clock
+the deployed replay UI is a hard contest requirement while Lambda is not — so
+the deployment budget went to the thing that has to exist. Nothing in the
+design depends on where the process runs.
 
 The Converse API is used specifically so the reasoning model is swappable by
 config rather than by rewrite. No model ID is hardcoded anywhere; both are read

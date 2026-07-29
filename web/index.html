@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Recall — shared agentic memory on CockroachDB</title>
+<style>
+  :root { color-scheme: light dark; --fg: #111; --muted: #666; --bg: #fff; --line: #e5e5e5; --ok: #0a7d32; --bad: #b3261e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #e8e8e8; --muted: #9a9a9a; --bg: #131313; --line: #2c2c2c; --ok: #4ade80; --bad: #f87171; }
+  }
+  body { margin: 0; padding: 3rem 1.25rem; background: var(--bg); color: var(--fg);
+         font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, sans-serif; }
+  main { max-width: 46rem; margin: 0 auto; }
+  h1 { font-size: 1.6rem; margin: 0 0 .25rem; letter-spacing: -.02em; }
+  p.sub { color: var(--muted); margin: 0 0 2rem; }
+  .card { border: 1px solid var(--line); border-radius: 10px; padding: 1.1rem 1.25rem; }
+  pre { overflow-x: auto; background: color-mix(in oklab, var(--fg) 5%, transparent);
+        padding: .85rem; border-radius: 7px; font-size: .85rem; margin: .75rem 0 0; }
+  .status { font-weight: 600; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+  footer { color: var(--muted); font-size: .85rem; margin-top: 2rem; }
+  a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Recall</h1>
+  <p class="sub">Shared agentic memory for a fleet of support agents — one memory
+  store in CockroachDB instead of three siloed ones.</p>
+
+  <div class="card">
+    <div>Deployment health <span id="status" class="status">checking…</span></div>
+    <pre id="out">…</pre>
+  </div>
+
+  <footer>
+    Scaffold only — the replay UI lands here.
+    <a href="https://github.com/teodora-ops/recall">Source</a>.
+  </footer>
+</main>
+<script>
+  fetch('/api/health')
+    .then(r => r.json())
+    .then(d => {
+      const s = document.getElementById('status');
+      s.textContent = d.ok ? 'connected' : 'failed';
+      s.className = 'status ' + (d.ok ? 'ok' : 'bad');
+      document.getElementById('out').textContent = JSON.stringify(d, null, 2);
+    })
+    .catch(e => {
+      const s = document.getElementById('status');
+      s.textContent = 'unreachable';
+      s.className = 'status bad';
+      document.getElementById('out').textContent = String(e);
+    });
+</script>
+</body>
+</html>
