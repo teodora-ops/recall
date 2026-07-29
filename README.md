@@ -15,8 +15,8 @@ memory *correct*: transactional, survivable, and reconstructable after the
 fact. Two of the four capabilities below do not survive being ported to
 Postgres + pgvector, and those are the two the project is built around.
 
-**Live:** [recall-rqd1.vercel.app](https://recall-rqd1.vercel.app) ·
-health check at [`/api/health`](https://recall-rqd1.vercel.app/api/health)
+**Live:** [recall-memory.vercel.app](https://recall-memory.vercel.app) ·
+health check at [`/api/health`](https://recall-memory.vercel.app/api/health)
 
 > Status: **week 1, in progress.** The corpus schema, the distributed vector
 > index and the embedding pipeline are live and verified against the cluster,
@@ -164,7 +164,7 @@ serving vectors from the old model.
 
 ### 0. The deployment reaches the cluster
 
-Live response from [`/api/health`](https://recall-rqd1.vercel.app/api/health),
+Live response from [`/api/health`](https://recall-memory.vercel.app/api/health),
 fetched 29 Jul 2026:
 
 ```json
