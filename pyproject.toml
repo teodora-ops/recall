@@ -2,7 +2,11 @@
 name = "recall"
 version = "0.1.0"
 description = "Shared agentic memory layer on CockroachDB"
-requires-python = ">=3.9"
+# psycopg 3.3.x requires 3.10+. This floor is not cosmetic: uv resolves
+# dependencies for every Python version the project claims to support, so
+# declaring >=3.9 fails the build on the 3.9 split even when the runtime is
+# 3.12. Vercel runs 3.12; local development is 3.14.
+requires-python = ">=3.10"
 
 # Declared here as well as in requirements.txt because Vercel's Python
 # runtime resolves dependencies from pyproject.toml when one is present.
