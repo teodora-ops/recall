@@ -26,9 +26,11 @@ import db
 # in mid-August, which is 30+ days back.
 TARGET = 7776000
 
-# Tables the replay path reads. Add to this as the schema grows — decisions
-# and actions land with the serializable-race work.
-REPLAY_TABLES = ["cases"]
+# Tables the replay path reads. Every one of these must hold the full window:
+# a decision is only reconstructable if the cases it recalled, the order it
+# acted on and the customer it concerned are all still readable at that
+# timestamp. One short table silently truncates the whole feature.
+REPLAY_TABLES = ["cases", "customers", "orders", "decisions", "actions"]
 
 
 def current_ttl(cur, table: str) -> int | None:
@@ -82,18 +84,33 @@ def main():
                 print(f"[{' OK ' if listed else '    '}]  {tag} {table:<22} {days}")
 
         print("-" * 68)
-        for t in missing:
-            print(f"note: '{t}' is listed as a replay table but does not exist yet")
         for t in unlisted:
             print(f"note: '{t}' exists but is not listed in REPLAY_TABLES — "
                   f"add it if replay reads it")
 
-        if short:
-            print(f"\n{len(short)} replay table(s) below target: {', '.join(short)}")
-            if not apply:
-                print("re-run with --apply to raise them")
+        # A missing replay table is a failure, not a note.
+        #
+        # This check exists to catch a table that quietly inherited the
+        # 75-minute default. A run that passes while one of those tables does
+        # not exist at all is worse than no check: it reports "all replay
+        # tables hold the required window" about a schema that cannot support
+        # replay. That is precisely the false green a pre-submission sweep
+        # must never produce.
+        for t in missing:
+            print(f"[FAIL]  replay table '{t}' is listed but DOES NOT EXIST")
+
+        if missing or short:
+            if short:
+                print(f"\n{len(short)} replay table(s) below target: "
+                      f"{', '.join(short)}")
+                if not apply:
+                    print("re-run with --apply to raise them")
+            if missing:
+                print(f"{len(missing)} replay table(s) missing: "
+                      f"{', '.join(missing)}")
+                print("run apply_schema.py before trusting this check")
             sys.exit(1)
-        print("\nAll replay tables hold the required window.")
+        print("\nAll replay tables exist and hold the required window.")
 
 
 if __name__ == "__main__":

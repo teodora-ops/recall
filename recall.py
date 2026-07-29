@@ -25,6 +25,15 @@ CHANNELS = ("email", "whatsapp", "webchat")
 def embedding_text(subject: str | None, body: str) -> str:
     """What actually goes to Titan.
 
+    *** FROZEN as of 29 Jul 2026, before the corpus was seeded. ***
+
+    Do not change the composition. Every row stores an embed_fingerprint of
+    sha256(model_id | this text); altering the format invalidates the
+    fingerprint on every case at once, so backfill() would re-embed the entire
+    corpus and every cached vector on disk would miss. That is recoverable but
+    slow and pointless. If the composition genuinely must change, treat it as
+    a corpus migration and say so out loud.
+
     Subject and body together — a subject line like "charged twice" carries
     most of the signal in short email cases, and dropping it measurably
     flattens retrieval. Resolution is deliberately excluded: at search time a
@@ -43,6 +52,16 @@ def ingest_case(channel: str, customer_ref: str, body: str,
     """Embed and insert one case. Returns the new case_id."""
     if channel not in CHANNELS:
         raise ValueError(f"channel must be one of {CHANNELS}, got {channel!r}")
+
+    # resolved=True with no resolution text would set resolved_at while
+    # leaving resolution NULL, violating resolved_cases_have_a_resolution.
+    # Refuse it here rather than letting the seeder discover it as a constraint
+    # error several hundred rows in.
+    if resolved and resolution is None:
+        raise ValueError(
+            "a resolved case needs resolution text — "
+            "pass resolution=..., or leave resolved=False for an open case"
+        )
 
     text = embedding_text(subject, body)
     vec = embeddings.embed(text)
