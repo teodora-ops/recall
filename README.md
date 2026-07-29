@@ -15,10 +15,15 @@ memory *correct*: transactional, survivable, and reconstructable after the
 fact. Two of the four capabilities below do not survive being ported to
 Postgres + pgvector, and those are the two the project is built around.
 
+**Live:** [recall-rqd1.vercel.app](https://recall-rqd1.vercel.app) ·
+health check at [`/api/health`](https://recall-rqd1.vercel.app/api/health)
+
 > Status: **week 1, in progress.** The corpus schema, the distributed vector
-> index and the embedding pipeline are live and verified against the cluster.
-> The agent, the three demos and the replay UI are not built yet. The
-> [Evidence](#evidence) section records only what has actually been run.
+> index and the embedding pipeline are live and verified against the cluster,
+> and the deployment path is proven end to end. The agent, the three demos and
+> the replay UI are not built yet — the deployed page is currently a health
+> check, not the replay UI. The [Evidence](#evidence) section records only what
+> has actually been run.
 
 ---
 
@@ -156,6 +161,46 @@ serving vectors from the old model.
 > the time the demo ran rather than assembled before submission. Each entry
 > says why the output proves the claim, because raw output nobody reads is
 > weaker than no entry.
+
+### 0. The deployment reaches the cluster
+
+Live response from [`/api/health`](https://recall-rqd1.vercel.app/api/health),
+fetched 29 Jul 2026:
+
+```json
+{
+  "ok": true,
+  "ca_resolved": "/var/task/certs/root.crt",
+  "cluster": "CockroachDB CCL v26.2.1",
+  "cases": 0,
+  "hlc": "1785338603511142481.0000000000",
+  "vector_index": true,
+  "retention_days": 90.0,
+  "replay_ok": true,
+  "ms": 1225
+}
+```
+
+**Why each field is there rather than a bare "ok".** A health check that only
+proves the process started is worth very little:
+
+- **`ca_resolved`** is the CA certificate shipped in this repo, resolving inside
+  the deployment's Linux filesystem. Earlier the same code built its CA path
+  from `%APPDATA%`, so it worked on the author's Windows machine and exited with
+  a misleading error everywhere else — including on any judge's Mac. This field
+  is the regression test for that.
+- **`hlc`** is `cluster_logical_timestamp()`. It is the exact value
+  `AS OF SYSTEM TIME` consumes, so its presence proves the replay mechanism is
+  reachable from the deployed environment, not merely from a laptop.
+- **`vector_index`** asserts `cases_embedding_idx` still exists. An index that
+  quietly stopped existing does not raise anything — every query keeps
+  succeeding, just via a full scan.
+- **`retention_days` / `replay_ok`** assert the MVCC window is still ≥ 90 days.
+  A short `gc.ttlseconds` also fails silently, and only surfaces once history is
+  old enough to have been garbage collected — which on this project's calendar
+  means during judging rather than during the build.
+
+`cases: 0` is correct: the corpus is empty until seeding.
 
 ### 1. The distributed vector index accepts `VECTOR(1024)` — and is actually used
 
