@@ -11,6 +11,7 @@ Kept read-only. Nothing here writes.
 
 import json
 import os
+import re
 import sys
 import time
 from http.server import BaseHTTPRequestHandler
@@ -38,6 +39,21 @@ class handler(BaseHTTPRequestHandler):
                 # deployed environment, not just from a laptop.
                 cur.execute("SELECT cluster_logical_timestamp()")
                 body["hlc"] = str(cur.fetchone()[0])
+
+                # The two things that fail silently rather than loudly: a
+                # vector index that quietly stopped existing, and an MVCC
+                # window too short for replay. Both are cheap to assert and
+                # neither shows up in an ordinary "can I connect" check.
+                cur.execute("SHOW INDEXES FROM cases")
+                names = {r[1] for r in cur.fetchall()}
+                body["vector_index"] = "cases_embedding_idx" in names
+
+                cur.execute("SHOW ZONE CONFIGURATION FROM TABLE cases")
+                zone = cur.fetchall()[0][1]
+                m = re.search(r"gc\.ttlseconds = (\d+)", zone)
+                secs = int(m.group(1)) if m else None
+                body["retention_days"] = round(secs / 86400, 1) if secs else None
+                body["replay_ok"] = bool(secs and secs >= 7776000)
             body["ok"] = True
         except Exception as e:  # noqa: BLE001
             body["error"] = f"{type(e).__name__}: {str(e).splitlines()[0][:300]}"
