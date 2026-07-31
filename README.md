@@ -18,12 +18,11 @@ Postgres + pgvector, and those are the two the project is built around.
 **Live:** [recall-memory.vercel.app](https://recall-memory.vercel.app) ·
 health check at [`/api/health`](https://recall-memory.vercel.app/api/health)
 
-> Status: **week 1, in progress.** The corpus schema, the distributed vector
-> index and the embedding pipeline are live and verified against the cluster,
-> and the deployment path is proven end to end. The agent, the three demos and
-> the replay UI are not built yet — the deployed page is currently a health
-> check, not the replay UI. The [Evidence](#evidence) section records only what
-> has actually been run.
+> Status: **in progress.** Semantic recall works against a seeded 300-case
+> corpus, and the deployment path is proven end to end. The agent, the three
+> demos and the replay UI are not built yet — the deployed page is currently a
+> health check, not the replay UI. The [Evidence](#evidence) section records
+> only what has actually been run.
 
 ---
 
@@ -31,7 +30,7 @@ health check at [`/api/health`](https://recall-memory.vercel.app/api/health)
 
 | # | Capability | What it demonstrates | Status |
 |---|---|---|---|
-| 1 | **Semantic recall** | Past cases embedded into a `VECTOR(1024)` column with a distributed C-SPANN index. A new case retrieves the closest historical resolutions as context — across channels, so an email case can surface a WhatsApp resolution. | Schema + pipeline verified |
+| 1 | **Semantic recall** | Past cases embedded into a `VECTOR(1024)` column with a distributed C-SPANN index. A new case retrieves the closest historical resolutions as context — across channels, so an email case can surface a WhatsApp resolution. | **Working** — 300-case corpus, index use verified at scale |
 | 2 | **Transactional decisions** | The agent's decision and the action it authorises commit in a single serializable transaction. Two agents race the same refund; the second aborts, retries, sees the refund already happened, and does not double-pay. | Not started |
 | 3 | **Point-in-time replay** | `AS OF SYSTEM TIME` reconstructs exactly what the agent knew at the moment of any past decision, plus a diff of what changed since. *"Why did the bot offer that discount?"* — **the headline feature.** | Mechanism verified, UI not built |
 | 4 | **Survivability** | Kill a node mid-conversation; the agent keeps its memory and keeps going. | Not started |
@@ -87,28 +86,36 @@ from `.env`.
 | `recall.py` | The pipeline: `ingest_case` / `backfill` / `search` |
 | `apply_schema.py` | Idempotent schema applier; prints what landed |
 | `retention.py` | Holds every replay-path table at the required MVCC window |
+| `persona.py` | The fictional business the corpus describes — the human-editable part |
+| `seed.py` | Builds the corpus: hand-written hero cases + Nova Pro batches, cached |
+| `explain_check.py` | Whether the planner uses the vector index, filtered and unfiltered |
+| `spike_replay.py` | The four schema-gating questions, answered against the cluster |
 | `vector_index_check.py` | Probes whether the cluster indexes `VECTOR(1024)` |
 | `verify_pipeline.py` | Self-cleaning end-to-end check of the whole path |
+| `api/`, `public/` | The deployed app |
+| `certs/root.crt` | Cluster CA, shipped so a fresh clone needs no setup |
 
 ---
 
 ## Setup
 
-**Requirements:** Python 3.11+, a CockroachDB Cloud cluster, an AWS account
+**Requirements:** Python 3.10+, a CockroachDB Cloud cluster, an AWS account
 with Bedrock access in `eu-west-2`.
 
 ```bash
 git clone https://github.com/teodora-ops/recall.git
 cd recall
-pip install "psycopg[binary]" boto3 python-dotenv
+pip install -r requirements.txt
 ```
 
-Download your cluster's CA certificate from the CockroachDB Cloud console. On
-Windows it belongs at `%APPDATA%\postgresql\root.crt`; on macOS and Linux at
-`~/.postgresql/root.crt`. `db.py` locates it automatically, which is why the
-connection string does not carry an `sslrootcert` parameter.
+The cluster CA ships in `certs/root.crt`, so there is nothing to download.
+`db.py` looks there first, then `$COCKROACH_CA`, then the platform default
+(`%APPDATA%\postgresql\root.crt` on Windows, `~/.postgresql/root.crt` on macOS
+and Linux) — which is why the connection string carries no `sslrootcert`
+parameter. It is attached only when `sslmode` actually verifies, so an insecure
+local cluster still connects.
 
-Create a `.env` in the repository root:
+Copy `.env.example` to `.env` and fill it in:
 
 ```ini
 AWS_REGION=eu-west-2
@@ -131,16 +138,20 @@ Then verify the account and the cluster before creating anything:
 
 ```bash
 python bedrock_check.py         # Bedrock reachable? which model IDs work?
+python spike_replay.py          # the four questions the schema depends on
 python vector_index_check.py    # does this cluster index VECTOR(1024)?
-python apply_schema.py          # create cases + index + retention
+python apply_schema.py          # create every table, index and zone config
 python retention.py             # confirm the MVCC window on replay tables
 python verify_pipeline.py       # end-to-end, self-cleaning
 ```
 
-Then use it:
+Then build the corpus and use it:
 
 ```bash
-python recall.py backfill
+python seed.py                        # generate only, writes nothing
+python seed.py --apply --embed        # ~300 cases, to S3 and CockroachDB
+python explain_check.py               # is the planner using the vector index?
+
 python recall.py search "you took the money off my card two times"
 ```
 
@@ -219,18 +230,20 @@ The index form this cluster accepts:
 CREATE VECTOR INDEX cases_embedding_idx ON cases (embedding);
 ```
 
-`EXPLAIN` for a nearest-neighbour query on the live `cases` table:
+`EXPLAIN` for a nearest-neighbour query on the live `cases` table, **at 300
+seeded rows** (the earlier capture was at 4 rows, where a full scan would have
+been a legitimate plan and the evidence proved nothing durable):
 
 ```
 EXPLAIN SELECT case_id FROM cases
-ORDER BY embedding <-> $1::VECTOR(1024) LIMIT 3;
+ORDER BY embedding <-> $1::VECTOR(1024) LIMIT 5;
 
 distribution: local
 
 • top-k
-│ estimated row count: 1
-│ order: +column18
-│ k: 3
+│ estimated row count: 5
+│ order: +column19
+│ k: 5
 │
 └── • render
     │
@@ -241,14 +254,14 @@ distribution: local
         │
         └── • vector search
               table: cases@cases_embedding_idx
-              target count: 3
+              target count: 5
 ```
 
 **Reading it bottom-up — why this is index access and not a scan:**
 
 1. **`• vector search → table: cases@cases_embedding_idx`** is the leaf, and it
    is the whole proof. This node is C-SPANN index access: it descends the
-   index and returns `target count: 3` approximate nearest candidates. A
+   index and returns `target count: 5` approximate nearest candidates. A
    fallback plan would have no `vector search` node at all — it would show a
    table scan over `cases@cases_pkey` feeding a sort.
 2. **`• lookup join` against `cases@cases_pkey`** exists *because* step 1 was an
@@ -257,20 +270,52 @@ distribution: local
    columns. A full scan would already have every column and would need no such
    join — its presence is corroborating evidence of index access.
 3. **`• top-k` at the apex** is a re-rank of the small candidate set from step 1
-   by exact distance, not a sort of the table. Note `estimated row count: 1`:
+   by exact distance, not a sort of the table. Note `estimated row count: 5`:
    the planner expects a handful of rows arriving here, not the corpus. This
    node is what makes an approximate index result exact at the top of the list.
 
-Two things worth stating because they affect how far this evidence goes:
+One thing worth stating because it affects how far this evidence goes: an
+earlier version of the checking script reported this as passing by matching the
+substring `"vector"` in the plan text — which also appears in the column type
+and the `ORDER BY` expression. That was a false positive on a plan nobody had
+read. The check now requires the *index name* to appear and `FULL SCAN` to be
+absent. The plan above satisfies the stricter check.
 
-- An earlier version of the checking script reported this as passing by
-  matching the substring `"vector"` in the plan text — which also appears in
-  the column type and the `ORDER BY` expression. That was a false positive on a
-  plan nobody had read. The check now requires the *index name* to appear and
-  `FULL SCAN` to be absent. The plan above satisfies the stricter check.
-- The plan was captured with only 4 rows in `cases`. Small tables can
-  legitimately plan as full scans, so this must be re-confirmed once real seed
-  data lands; the row count that matters for the demo is not 4.
+**Filtered searches fall off the index, and are handled in Python.**
+
+Adding any `WHERE` clause alongside the vector `ORDER BY` drops the plan onto a
+full scan. Run `python explain_check.py` to reproduce:
+
+```
+  index   unfiltered
+  SCAN    channel = 'whatsapp'
+  SCAN    resolved only
+  SCAN    channel + resolved
+```
+
+```
+└── • filter
+    │ filter: (channel = 'email') AND (resolution IS NOT NULL)
+    │
+    └── • scan
+          table: cases@cases_pkey
+          spans: FULL SCAN
+```
+
+This is a planner limitation, not stale statistics — the same result holds
+after `ANALYZE cases` with row counts correctly reporting 300. CockroachDB even
+recommends `CREATE INDEX ON cases (channel, resolution) STORING (embedding)`.
+
+**That recommendation is deliberately not taken.** A prefixed vector index
+scopes every search to one channel, which re-creates exactly the silos this
+project exists to remove. Instead `recall.search()` over-fetches through the
+unfiltered index and filters the candidates in Python. The trade-off, stated
+rather than hidden: over-fetching is approximate, so a highly selective filter
+could push a true nearest neighbour outside the candidate window. The
+`overfetch` parameter exists for when that matters more than latency.
+
+This is the kind of finding a naive check misses entirely — the index exists,
+the unfiltered query uses it, and every filtered query silently scans the table.
 
 The width is separately confirmed to be enforced rather than decorative:
 
@@ -289,21 +334,22 @@ The width is separately confirmed to be enforced rather than decorative:
 
 The point of one shared memory is that the channel a question arrives on does
 not determine which memories it can reach. Querying with a phrase written like
-a chat message, against a corpus of four cases spanning all three channels:
+a chat message, against the seeded corpus of 300 cases:
 
 ```
 query: "you took the money off my card two times"
 
-[1.1099] webchat   Charged twice for the same order
-[1.3523] whatsapp  still waiting on my parcel
-[1.3664] email     Order #4471 arrived damaged
+[1.0201] email     Double charge on my credit card
+[1.0291] whatsapp  double charged
+[1.0364] email     Double charge on my credit card
+[1.0496] webchat   Double charge on my card
+[1.0564] whatsapp  charged twice
 ```
 
-The nearest case is the duplicate-charge one, retrieved **from a different
-channel than the query's phrasing implies**, and it wins by a clear margin
-(1.11 vs 1.35) rather than by a hair. The vector index carries no `channel`
-prefix column precisely so this works; prefixing it would re-create the silos
-the project exists to remove.
+Every result is a duplicate-charge case, and **all three channels appear in the
+top five**. A chat-phrased query reaches formal email cases and terse WhatsApp
+messages alike, which is the behaviour the whole design is for. The vector
+index carries no `channel` prefix column precisely so this works.
 
 ### 3. Point-in-time replay reads deleted history
 

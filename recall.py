@@ -147,48 +147,66 @@ def backfill(limit: int | None = None, progress: bool = True) -> int:
 
 
 def search(text: str, k: int = 5, channel: str | None = None,
-           resolved_only: bool = False, conn=None) -> list[dict]:
+           resolved_only: bool = False, conn=None,
+           overfetch: int | None = None) -> list[dict]:
     """Nearest historical cases to a new message.
 
-    channel is an optional post-filter, not the default: an email case
+    channel is an optional post-filter, never the default: an email case
     retrieving a WhatsApp resolution is the behaviour Recall exists to show.
 
     Distance is <-> (L2). Vectors are normalised at write time, so this ranks
     identically to cosine while matching the index's default opclass — which
-    is what keeps the query on the vector index instead of a full scan.
+    is what keeps the unfiltered query on the vector index.
+
+    FILTERS ARE APPLIED IN PYTHON, NOT IN SQL. Measured on the seeded corpus
+    (see explain_check.py): adding any WHERE clause alongside the vector
+    ORDER BY drops the plan off cases_embedding_idx and onto a FULL SCAN —
+    verified after ANALYZE, so it is a planner limitation and not stale
+    statistics. The fix is to over-fetch through the index and filter the
+    candidates here.
+
+    The alternative — a prefixed index on (channel, embedding) — is rejected
+    deliberately. It would scope every search to one channel, re-creating the
+    silos this project exists to remove.
+
+    Caveat, stated rather than hidden: over-fetching is approximate. With a
+    highly selective filter the true nearest neighbours could fall outside the
+    candidate window. Raise `overfetch` if that matters more than latency.
     """
     vec = embeddings.embed(text)
+    vec_sql = embeddings.to_sql(vec)
+    filtered = bool(channel) or resolved_only
 
-    where, params = [], [embeddings.to_sql(vec)]
-    if channel:
-        where.append("channel = %s")
-        params.append(channel)
-    if resolved_only:
-        where.append("resolution IS NOT NULL")
-    clause = ("WHERE " + " AND ".join(where)) if where else ""
-    params.append(k)
+    # Fetch more than we need when filtering, since some candidates will be
+    # discarded. Roughly: one channel keeps a third, resolved keeps most.
+    limit = k if not filtered else (overfetch or max(k * 10, 60))
 
     owns = conn is None
     conn = conn or db.connect()
     try:
         cur = conn.cursor()
         cur.execute(
-            f"""
+            """
             SELECT case_id, channel, customer_ref, subject, body,
                    resolution, outcome, opened_at,
                    embedding <-> %s::VECTOR(1024) AS distance
             FROM cases
-            {clause}
             ORDER BY distance
             LIMIT %s
             """,
-            params,
+            (vec_sql, limit),
         )
         cols = [d.name for d in cur.description]
-        return [dict(zip(cols, r)) for r in cur.fetchall()]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
     finally:
         if owns:
             conn.close()
+
+    if channel:
+        rows = [r for r in rows if r["channel"] == channel]
+    if resolved_only:
+        rows = [r for r in rows if r["resolution"] is not None]
+    return rows[:k]
 
 
 def _cli(argv: Iterable[str]) -> None:

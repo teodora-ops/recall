@@ -114,14 +114,24 @@ def main():
         print(f"[ OK ]   ingested {len(ids)} case(s) through the pipeline")
 
         def retrieval_is_sane():
-            # A billing complaint should pull back the duplicate-charge case
-            # first — and it should do so from a different channel than the
-            # query implies, which is the cross-channel behaviour Recall is for.
-            hits = recall.search("you took the money off my card two times", k=3)
+            # A billing complaint must pull back duplicate-charge cases.
+            #
+            # Deliberately not asserting that a specific fixture ranks first:
+            # once the corpus is seeded, real cases outrank the throwaways and
+            # they should. What matters is that the top hit is about the right
+            # subject, and that the results are not all from one channel —
+            # cross-channel recall is the point.
+            hits = recall.search("you took the money off my card two times", k=5)
             lines = [f"[{h['distance']:.4f}] {h['channel']:<9} {h['subject']}"
                      for h in hits]
-            top = hits[0]["subject"] if hits else ""
-            return "twice" in top.lower(), "\n".join(lines)
+            if not hits:
+                return False, "no results"
+            top = f"{hits[0]['subject'] or ''} {hits[0]['body'] or ''}".lower()
+            on_topic = any(w in top for w in ("twice", "double", "two times",
+                                              "charged", "billed"))
+            channels = {h["channel"] for h in hits}
+            detail = "\n".join(lines) + f"\nchannels represented: {sorted(channels)}"
+            return on_topic and len(channels) > 1, detail
 
         failures += not check("nearest neighbour is the duplicate-charge case",
                               retrieval_is_sane)
@@ -158,10 +168,9 @@ def main():
 
     print("-" * 68)
     if failures:
-        print(f"{failures} CHECK(S) FAILED — do not seed yet.")
+        print(f"{failures} CHECK(S) FAILED.")
         sys.exit(1)
-    print("All checks passed. VECTOR(1024) pipeline is live and the corpus")
-    print("is empty and ready to seed.")
+    print("All checks passed. The VECTOR(1024) pipeline is live end to end.")
 
 
 if __name__ == "__main__":
