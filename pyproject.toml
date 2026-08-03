@@ -21,4 +21,4 @@ dependencies = [
 # explicit entrypoint. `handler` is the BaseHTTPRequestHandler subclass in
 # api/health.py, which is the form the build error itself suggested.
 [tool.vercel]
-entrypoint = "api.health:handler"
+entrypoint = "api.index:handler"

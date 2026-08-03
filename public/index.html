@@ -5,55 +5,213 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Recall — shared agentic memory on CockroachDB</title>
 <style>
-  :root { color-scheme: light dark; --fg: #111; --muted: #666; --bg: #fff; --line: #e5e5e5; --ok: #0a7d32; --bad: #b3261e; }
-  @media (prefers-color-scheme: dark) {
-    :root { --fg: #e8e8e8; --muted: #9a9a9a; --bg: #131313; --line: #2c2c2c; --ok: #4ade80; --bad: #f87171; }
+  :root {
+    color-scheme: light dark;
+    --fg:#16181d; --muted:#6b7280; --bg:#fbfbfc; --card:#fff; --line:#e4e6ea;
+    --ok:#0a7d32; --bad:#b3261e; --warn:#8a5a00; --accent:#2f5fd0;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   }
-  body { margin: 0; padding: 3rem 1.25rem; background: var(--bg); color: var(--fg);
-         font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, sans-serif; }
-  main { max-width: 46rem; margin: 0 auto; }
-  h1 { font-size: 1.6rem; margin: 0 0 .25rem; letter-spacing: -.02em; }
-  p.sub { color: var(--muted); margin: 0 0 2rem; }
-  .card { border: 1px solid var(--line); border-radius: 10px; padding: 1.1rem 1.25rem; }
-  pre { overflow-x: auto; background: color-mix(in oklab, var(--fg) 5%, transparent);
-        padding: .85rem; border-radius: 7px; font-size: .85rem; margin: .75rem 0 0; }
-  .status { font-weight: 600; }
-  .ok { color: var(--ok); } .bad { color: var(--bad); }
-  footer { color: var(--muted); font-size: .85rem; margin-top: 2rem; }
-  a { color: inherit; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg:#e6e8ec; --muted:#9aa1ad; --bg:#0f1114; --card:#171a1f;
+            --line:#2a2e36; --ok:#4ade80; --bad:#f87171; --warn:#fbbf24;
+            --accent:#7aa2f7; }
+  }
+  * { box-sizing:border-box }
+  body { margin:0; padding:2.5rem 1.25rem 4rem; background:var(--bg); color:var(--fg);
+         font:15px/1.6 ui-sans-serif, system-ui, -apple-system, sans-serif; }
+  main { max-width:64rem; margin:0 auto }
+  h1 { font-size:1.7rem; margin:0 0 .2rem; letter-spacing:-.02em }
+  h2 { font-size:1.05rem; margin:2.5rem 0 .75rem; letter-spacing:-.01em }
+  .sub { color:var(--muted); margin:0 0 .5rem; max-width:46rem }
+  .bar { display:flex; gap:.5rem; flex-wrap:wrap; align-items:center;
+         margin:1.25rem 0 0; font-size:.85rem; color:var(--muted) }
+  .pill { border:1px solid var(--line); border-radius:999px; padding:.15rem .6rem;
+          background:var(--card) }
+  .pill.ok { color:var(--ok); border-color:color-mix(in oklab,var(--ok) 40%,var(--line)) }
+  .pill.bad { color:var(--bad); border-color:color-mix(in oklab,var(--bad) 40%,var(--line)) }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:11px;
+          padding:1.05rem 1.15rem; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:1rem }
+  @media (max-width:760px){ .grid { grid-template-columns:1fr } }
+  .kind { font-weight:650; letter-spacing:-.01em }
+  .kind.refund { color:var(--ok) } .kind.decline { color:var(--bad) }
+  .meta { color:var(--muted); font-size:.82rem; font-family:var(--mono) }
+  .amount { font-size:1.35rem; font-weight:650; letter-spacing:-.02em; margin:.15rem 0 .4rem }
+  ul { margin:.4rem 0 0; padding-left:1.1rem } li { margin:.2rem 0 }
+  .case { border-left:2px solid var(--line); padding:.1rem 0 .1rem .7rem; margin:.55rem 0 }
+  .chan { font-family:var(--mono); font-size:.72rem; color:var(--muted);
+          text-transform:uppercase; letter-spacing:.04em }
+  .open { color:var(--warn); font-style:italic }
+  .then { color:var(--muted); text-decoration:line-through }
+  .now { color:var(--fg); font-weight:550 }
+  .flip { border:1px solid color-mix(in oklab,var(--accent) 45%,var(--line));
+          background:color-mix(in oklab,var(--accent) 7%,var(--card));
+          border-radius:11px; padding:1rem 1.15rem; margin-top:1rem }
+  table { width:100%; border-collapse:collapse; font-size:.88rem }
+  th,td { text-align:left; padding:.45rem .5rem; border-bottom:1px solid var(--line) }
+  th { color:var(--muted); font-weight:550; font-size:.78rem; text-transform:uppercase;
+       letter-spacing:.04em }
+  tr[data-id] { cursor:pointer }
+  tr[data-id]:hover td { background:color-mix(in oklab,var(--accent) 8%,transparent) }
+  code { font-family:var(--mono); font-size:.85em }
+  .empty { color:var(--muted); font-style:italic }
+  footer { margin-top:3rem; color:var(--muted); font-size:.84rem }
+  a { color:var(--accent) }
+  .scroll { overflow-x:auto }
 </style>
 </head>
 <body>
 <main>
   <h1>Recall</h1>
-  <p class="sub">Shared agentic memory for a fleet of support agents — one memory
-  store in CockroachDB instead of three siloed ones.</p>
+  <p class="sub">Shared agentic memory for a fleet of support agents. One memory
+  store in CockroachDB instead of three siloed ones — and a record of what each
+  agent knew at the moment it decided.</p>
+  <div class="bar" id="status"><span class="pill">checking…</span></div>
 
-  <div class="card">
-    <div>Deployment health <span id="status" class="status">checking…</span></div>
-    <pre id="out">…</pre>
-  </div>
+  <h2>Why did the agent decide that?</h2>
+  <p class="sub">Jess Ellis was charged £34.98 twice for one order and reported it
+  on <strong>email</strong> and on <strong>WhatsApp</strong>. Two agents picked it
+  up. Both read the order, both saw no refund yet. Here is what each did — and
+  what each knew when it decided.</p>
+  <div class="grid" id="hero"></div>
+  <div id="flip"></div>
+
+  <h2>Decision timeline</h2>
+  <p class="sub">Click any row to reconstruct it.</p>
+  <div class="card scroll"><table id="timeline">
+    <thead><tr><th>when</th><th>agent</th><th>order</th><th>decision</th>
+    <th>amount</th><th></th></tr></thead><tbody></tbody></table></div>
+
+  <h2 id="detail-h" style="display:none">Replay</h2>
+  <div id="detail"></div>
 
   <footer>
-    Scaffold only — the replay UI lands here.
-    <a href="https://github.com/teodora-ops/recall">Source</a>.
+    Reconstructed with <code>AS OF SYSTEM TIME</code> against CockroachDB.
+    This page renders <code>replay.diff()</code> unchanged — the same function the
+    CLI prints, so the README evidence and this demo are the same code path.
+    <a href="https://github.com/teodora-ops/recall">Source</a> ·
+    <a href="/api/health">health</a>
   </footer>
 </main>
+
 <script>
-  fetch('/api/health')
-    .then(r => r.json())
-    .then(d => {
-      const s = document.getElementById('status');
-      s.textContent = d.ok ? 'connected' : 'failed';
-      s.className = 'status ' + (d.ok ? 'ok' : 'bad');
-      document.getElementById('out').textContent = JSON.stringify(d, null, 2);
-    })
-    .catch(e => {
-      const s = document.getElementById('status');
-      s.textContent = 'unreachable';
-      s.className = 'status bad';
-      document.getElementById('out').textContent = String(e);
-    });
+const $ = s => document.querySelector(s);
+const money = p => '£' + ((p||0)/100).toFixed(2);
+const esc = s => (s===null||s===undefined) ? '' :
+  s.toString().replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const kindClass = k => (k||'').startsWith('refund') ? 'refund' : 'decline';
+const when = s => esc((s||'').slice(0,16).replace('T',' '));
+async function get(u){ const r = await fetch(u); return r.json(); }
+
+(async function init(){
+  try {
+    const h = await get('/api/health');
+    $('#status').innerHTML = [
+      `<span class="pill ${h.ok?'ok':'bad'}">${h.ok?'connected':'error'}</span>`,
+      `<span class="pill">${esc(h.cluster||'')}</span>`,
+      `<span class="pill">${h.cases} cases</span>`,
+      `<span class="pill">${h.decisions} decisions</span>`,
+      `<span class="pill ${h.replay_ok?'ok':'bad'}">replay window ${h.retention_days}d</span>`,
+      `<span class="pill ${h.read_only?'ok':''}">${h.read_only?'read-only user':'admin user'}</span>`
+    ].join('');
+  } catch(e){ $('#status').innerHTML = '<span class="pill bad">unreachable</span>'; }
+
+  const list = await get('/api/replay');
+  const rows = list.decisions || [];
+  const tb = $('#timeline tbody');
+  tb.innerHTML = rows.map(d => `
+    <tr data-id="${esc(d.decision_id)}">
+      <td class="meta">${when(d.decided_at)}</td>
+      <td>${esc(d.agent_id)}</td>
+      <td class="meta">${esc(d.order_id||'—')}</td>
+      <td><span class="kind ${kindClass(d.decision_kind)}">${esc(d.decision_kind)}</span></td>
+      <td>${money(d.amount_minor)}</td>
+      <td class="meta">${d.abort_sqlstate ? 'retried after '+esc(d.abort_sqlstate) : ''}</td>
+    </tr>`).join('') || '<tr><td colspan="6" class="empty">no decisions yet</td></tr>';
+  tb.querySelectorAll('tr[data-id]').forEach(tr =>
+    tr.addEventListener('click', () => showDetail(tr.dataset.id)));
+
+  const contended = rows.filter(d => d.order_id);
+  if (contended.length >= 2) {
+    const orderId = contended[0].order_id;
+    const pair = contended.filter(d => d.order_id === orderId).slice(0,2).reverse();
+    const full = await Promise.all(
+      pair.map(d => get('/api/replay?id=' + d.decision_id.slice(0,8))));
+    $('#hero').innerHTML = full.filter(f => f.ok).map(renderSide).join('');
+    const flipped = full.find(f => f.counterfactual && f.counterfactual.flipped);
+    if (flipped) {
+      const cf = flipped.counterfactual;
+      $('#flip').innerHTML = `<div class="flip">
+        <strong>The same intent, judged against today's memory, flips.</strong><br>
+        The agent proposed <code>${esc(cf.proposed)}</code>. Against the world it
+        saw, that was authorised as <code>${esc(cf.then)}</code>; against the world
+        today it would be <code>${esc(cf.now)}</code>.
+        <div class="meta" style="margin-top:.4rem">Authorisation is a pure function,
+        so this is recomputed exactly rather than estimated.</div>
+      </div>`;
+    }
+  }
+})();
+
+function renderSide(r){
+  const d = r.decision, then = r.then || {};
+  const recalled = (then.recalled||[]).map(c => `
+    <div class="case">
+      <div class="chan">${esc(c.channel)} · #${c.rank}</div>
+      <div>${esc(c.subject)}</div>
+      <div class="meta">${c.resolution ? esc(c.resolution)
+        : '<span class="open">still open when the agent read it</span>'}</div>
+    </div>`).join('');
+  const order = then.order ? `<div class="meta" style="margin-top:.5rem">
+      order ${esc(then.order.order_id)} — ${esc(then.order.item)},
+      ${money(then.order.amount_minor)}, already refunded
+      ${money(then.order.refunded_minor)}</div>` : '';
+  return `<div class="card">
+    <div class="meta">${esc(d.agent_id)} · ${when(d.decided_at)}</div>
+    <div class="amount"><span class="kind ${kindClass(d.decision_kind)}">${esc(d.decision_kind)}</span>
+      &nbsp;${money(d.amount_minor)}</div>
+    <div>${esc(d.rationale)}</div>
+    ${d.abort_sqlstate ? `<div class="meta" style="margin-top:.5rem">aborted with SQLSTATE
+      ${esc(d.abort_sqlstate)} — re-read the order and decided again on attempt ${d.attempt}</div>` : ''}
+    ${order}
+    <div class="meta" style="margin-top:.9rem">what it recalled, as it stood</div>
+    ${recalled || '<div class="empty">nothing recalled</div>'}
+  </div>`;
+}
+
+async function showDetail(id){
+  $('#detail-h').style.display = '';
+  $('#detail').innerHTML = '<div class="card empty">reconstructing…</div>';
+  const r = await get('/api/replay?id=' + id.slice(0,8));
+  if (!r.ok) { $('#detail').innerHTML = `<div class="card">${esc(r.error)}</div>`; return; }
+  const d = r.decision, df = r.diff || {}, rc = df.recall_changes || {};
+  const ch = [];
+  (df.order_changes||[]).forEach(c => { const m = c.field.includes('minor');
+    ch.push(`order.${esc(c.field)}: <span class="then">${m?money(c.then):esc(c.then)}</span>
+             → <span class="now">${m?money(c.now):esc(c.now)}</span>`); });
+  (df.case_changes||[]).forEach(c => ch.push(
+    `case “${esc(c.subject)}” ${esc(c.field||c.change)}:
+     <span class="then">${c.then===null?'—':esc(c.then)}</span>
+     → <span class="now">${esc(c.now)}</span>`));
+  (rc.entered||[]).forEach(e => ch.push(`entered top-5 at #${e.rank}: ${esc(e.subject)}`));
+  (rc.left||[]).forEach(e => ch.push(`left top-5 (was #${e.rank}): ${esc(e.subject)}`));
+  (rc.moved||[]).forEach(e => ch.push(`moved #${e.then_rank} → #${e.now_rank}: ${esc(e.subject)}`));
+  (df.later_decisions||[]).forEach(l => ch.push(
+    `later: ${esc(l.agent_id)} ${esc(l.decision_kind)} ${money(l.amount_minor)}` +
+    (l.abort_sqlstate ? ' (after '+esc(l.abort_sqlstate)+')' : '')));
+
+  $('#detail').innerHTML = `<div class="card">
+    <div class="meta">${esc(d.decision_id)}</div>
+    <div class="amount"><span class="kind ${kindClass(d.decision_kind)}">${esc(d.decision_kind)}</span>
+      &nbsp;${money(d.amount_minor)}</div>
+    <div>${esc(d.rationale)}</div>
+    <div class="meta" style="margin-top:.6rem">snapshot ${esc(r.snapshot_hlc)}</div>
+    <h3 style="font-size:.95rem;margin:1.2rem 0 .3rem">What changed since</h3>
+    ${ch.length ? '<ul>'+ch.map(c=>`<li>${c}</li>`).join('')+'</ul>'
+                : '<div class="empty">nothing has changed since this decision</div>'}
+  </div>`;
+  $('#detail').scrollIntoView({behavior:'smooth', block:'nearest'});
+}
 </script>
 </body>
 </html>
