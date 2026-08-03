@@ -40,9 +40,25 @@ def use_reader() -> bool:
     return bool(reader)
 
 
+def env_report() -> dict:
+    """Which configuration the runtime can actually see — names and lengths
+    only, never values.
+
+    Worth having: `read_only: false` alone cannot distinguish "the variable is
+    missing" from "the variable is set but something else went wrong", and on
+    a hosted platform you cannot just look at the environment.
+    """
+    interesting = ["COCKROACH_URL", "COCKROACH_READER_URL", "COCKROACH_CA",
+                   "AWS_REGION", "S3_BUCKET", "BEDROCK_CHAT_MODEL",
+                   "BEDROCK_EMBED_MODEL"]
+    return {k: (f"set ({len(os.environ[k])} chars)" if os.environ.get(k)
+                else "not set") for k in interesting}
+
+
 def route_health() -> dict:
     import db
     body: dict = {"ok": False}
+    body["env"] = env_report()
     body["ca_resolved"] = db.ca_path()
     with db.connect() as conn:
         cur = conn.cursor()
