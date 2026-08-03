@@ -18,11 +18,48 @@ Postgres + pgvector, and those are the two the project is built around.
 **Live:** [recall-memory.vercel.app](https://recall-memory.vercel.app) ·
 health check at [`/api/health`](https://recall-memory.vercel.app/api/health)
 
-> Status: **in progress.** Semantic recall works against a seeded 300-case
-> corpus, and the deployment path is proven end to end. The agent, the three
-> demos and the replay UI are not built yet — the deployed page is currently a
-> health check, not the replay UI. The [Evidence](#evidence) section records
-> only what has actually been run.
+> Status: **three of four capabilities working**, each with reproducible
+> evidence below. Semantic recall, the transactional race and point-in-time
+> replay all run against the live cluster, and the replay UI is deployed.
+> Survivability is not demonstrated yet. The [Evidence](#evidence) section
+> records only what has actually been run — nothing is described as working on
+> the strength of the code existing.
+
+---
+
+## What is at the live URL
+
+[**recall-memory.vercel.app**](https://recall-memory.vercel.app)
+
+- **The hero screen** — the email agent's approval beside the WhatsApp agent's
+  decline. Same order, minutes apart, opposite decisions, both correct at their
+  own timestamp. Under each, the cases it recalled *as they stood* — including
+  the ones still open when it read them.
+- **The counterfactual** — the same intent judged against today's memory, which
+  flips to a decline.
+- **A decision timeline** — click any row to reconstruct it.
+- **"Run a new case"** — mints a throwaway order, runs an agent turn in a real
+  serializable transaction, and the resulting decision is replayable seconds
+  later. Not a recording.
+
+Two properties worth stating, because they are structural rather than claimed:
+
+**The page contains no diff logic.** It renders `replay.diff()` unchanged — the
+same function `python replay.py diff` prints — so the terminal evidence below
+and the deployed demo are provably the same code path.
+
+**Replay makes no model call.** The query vector is stored on each decision, so
+replay re-runs the exact historical query rather than re-embedding it. Verified
+by running it with deliberately invalid AWS credentials: it completes normally,
+while `recall.py search` fails with `UnrecognizedClientException` on the same
+credentials. So the deployed page needs no AWS keys, costs nothing per view, and
+is unaffected by a later model swap.
+
+The live "run a new case" path is the same: it supplies a stored vector and a
+fixed proposal, so the button makes no Bedrock call either. What it does *not*
+fake is the part that matters — the transaction, the policy gate, the decision
+row and the HLC anchor are all real, which is why the result genuinely replays.
+Only the rationale text is pre-written, and the page says so.
 
 ---
 
@@ -32,8 +69,8 @@ health check at [`/api/health`](https://recall-memory.vercel.app/api/health)
 |---|---|---|---|
 | 1 | **Semantic recall** | Past cases embedded into a `VECTOR(1024)` column with a distributed C-SPANN index. A new case retrieves the closest historical resolutions as context — across channels, so an email case can surface a WhatsApp resolution. | **Working** — 300-case corpus, index use verified at scale |
 | 2 | **Transactional decisions** | The agent's decision and the action it authorises commit in a single serializable transaction. Two agents race the same refund; the second aborts, retries, sees the refund already happened, and does not double-pay. | **Working** — real `40001`, with a READ COMMITTED control showing the double-pay |
-| 3 | **Point-in-time replay** | `AS OF SYSTEM TIME` reconstructs exactly what the agent knew at the moment of any past decision, plus a diff of what changed since. *"Why did the bot offer that discount?"* — **the headline feature.** | **Working** in the CLI, with an exact counterfactual; UI is Phase 6 |
-| 4 | **Survivability** | Kill a node mid-conversation; the agent keeps its memory and keeps going. | Not started |
+| 3 | **Point-in-time replay** | `AS OF SYSTEM TIME` reconstructs exactly what the agent knew at the moment of any past decision, plus a diff of what changed since. *"Why did the bot offer that discount?"* — **the headline feature.** | **Working** — CLI and live UI, with an exact counterfactual |
+| 4 | **Survivability** | Kill a node mid-conversation; the agent keeps its memory and keeps going. | Not demonstrated yet — see [Evidence 5](#5-node-kill--survivability) |
 
 Capabilities 2 and 3 are the ones that cannot be swapped onto another
 database. They get protected ahead of everything else.
@@ -49,7 +86,8 @@ whatsapp ─┼─→  agent (Python)  ─────→  Bedrock Nova Pro     
                      │                 S3                    (case artifacts)
                      ↓
               CockroachDB Cloud  ── cases + C-SPANN vector index
-              (eu-west-2, v26.2.1)   decisions + actions  [to come]
+              (eu-west-2, v26.2.1)   customers, orders,
+                                     decisions + actions
                      │
                      ├─→  AS OF SYSTEM TIME  ──→  replay UI (Vercel)
                      └─→  managed MCP server (read-only)  ──→  analyst access
@@ -84,19 +122,22 @@ from `.env`.
 | `db.py` | Connection helper — joins the cluster URL to the local CA cert |
 | `embeddings.py` | Titan v2 embeddings with a mandatory on-disk cache |
 | `recall.py` | The pipeline: `ingest_case` / `backfill` / `search` |
+| `txn.py` | `run_serializable()`, the 40001 retry, and the `AS OF SYSTEM TIME` timestamp gate |
+| `agent.py` | One agent turn: recall and propose outside the transaction, decide and write inside it |
+| `race.py` | Two agents, one refund — and the isolation control |
+| `replay.py` | Reconstruct what an agent knew, and diff it against now |
+| `sandbox.py` | The live "run a new case" path, with no model call |
+| `create_reader.py` | The read-only SQL user, and proof it cannot write |
 | `apply_schema.py` | Idempotent schema applier; prints what landed |
 | `retention.py` | Holds every replay-path table at the required MVCC window |
 | `persona.py` | The fictional business the corpus describes — the human-editable part |
 | `seed.py` | Builds the corpus: hand-written hero cases + Nova Pro batches, cached |
-| `txn.py` | `run_serializable()`, the 40001 retry, and the AS OF SYSTEM TIME timestamp gate |
-| `agent.py` | One agent turn: recall and propose outside the transaction, decide and write inside it |
-| `race.py` | Two agents, one refund — and the isolation control |
-| `replay.py` | Reconstruct what an agent knew, and diff it against now |
 | `explain_check.py` | Whether the planner uses the vector index, filtered and unfiltered |
 | `spike_replay.py` | The four schema-gating questions, answered against the cluster |
 | `vector_index_check.py` | Probes whether the cluster indexes `VECTOR(1024)` |
 | `verify_pipeline.py` | Self-cleaning end-to-end check of the whole path |
-| `api/`, `public/` | The deployed app |
+| `api/index.py` | The deployed API — one entrypoint, routes `/api/health`, `/api/replay`, `/api/run` |
+| `public/index.html` | The replay UI |
 | `certs/root.crt` | Cluster CA, shipped so a fresh clone needs no setup |
 
 ---
@@ -171,6 +212,8 @@ python race.py --control         # the same code at READ COMMITTED -> Evidence 4
 python seed.py --drift           # move the world on, AFTER the decisions
 python replay.py list
 python replay.py diff <id>       # -> Evidence 6
+
+python sandbox.py                # one live agent turn, no model call
 ```
 
 Two ordering constraints, both learned the hard way. The reader must exist
@@ -531,6 +574,56 @@ single transaction timestamp to record — and therefore no replay anchor. The
 headline feature does not merely work *better* at SERIALIZABLE; it cannot be
 recorded without it. Capabilities 2 and 3 turn out to be the same mechanism
 viewed from two angles.
+
+### 4c. The public page cannot write
+
+The deployed UI reads through `recall_reader`, not the admin account. That is
+checkable from outside — [`/api/health`](https://recall-memory.vercel.app/api/health)
+reports which credential is live:
+
+```json
+{ "sql_user": "recall_reader", "read_only": true }
+```
+
+`python create_reader.py --password '<pw>' --verify` connects *as* that user and
+proves the boundary rather than asserting it:
+
+```
+connected as: recall_reader
+--------------------------------------------------------------
+[ OK ]   SELECT cases                       303 rows
+[ OK ]   AS OF SYSTEM TIME read             303 rows
+--------------------------------------------------------------
+[ OK ]   UPDATE orders                      refused (42501)
+[ OK ]   DELETE decisions                   refused (42501)
+[ OK ]   INSERT cases                       refused (42501)
+[ OK ]   DROP TABLE cases                   refused (42501)
+[ OK ]   CREATE TABLE                       refused (42501)
+--------------------------------------------------------------
+Reader can read history and cannot change it.
+```
+
+It reads history, including `AS OF SYSTEM TIME`, and every write is refused with
+**42501 — insufficient privilege**. That distinction matters more than it looks:
+a reader that could write could alter the very history it exists to report on,
+so the audit trail and the thing auditing it would share a credential.
+
+Three things this check caught that `GRANT` alone did not fix:
+
+- **`CREATE TABLE` succeeded.** The privilege is not held by the user — the
+  `public` pseudo-role holds `CREATE` on schema `public` and every account
+  inherits it. Revoking from `recall_reader` was a no-op; it had to be revoked
+  from `public` itself.
+- **The `CREATE` probe then passed for the wrong reason.** It used a fixed table
+  name, so once the leak had actually created it the refusal became `42P07`
+  (*duplicate table*) rather than `42501` — the check silently stopped testing
+  permissions. It now uses a random name per run and asserts the SQLSTATE, not
+  merely that something threw.
+- **`AS OF SYSTEM TIME` failed** for the reader with *"role was concurrently
+  dropped"*. Not permissions: CockroachDB resolves role identity at the
+  historical timestamp, and the role did not exist in that past. **A read-only
+  user cannot replay history from before it was created** — so create the reader
+  before recording anything you intend to replay.
 
 ### 5. Node kill — survivability
 
