@@ -26,6 +26,15 @@ from urllib.parse import urlparse, parse_qs
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Captured at import, before anything can overwrite it.
+#
+# use_reader() points COCKROACH_URL at the read-only credential, and a warm
+# serverless container reuses the process — so that mutation survives into the
+# NEXT request. The write path then read the reader URL as its "writer" and was
+# refused by the database. Holding the original here means the two credentials
+# cannot leak into each other however many requests a container serves.
+ADMIN_URL = os.environ.get("COCKROACH_URL")
+
 
 def use_reader() -> bool:
     """Point db.py at the read-only credential if one is configured.
@@ -113,7 +122,9 @@ def route_run() -> tuple[int, dict]:
     A judge in September must not be able to exhaust the refund on ORD-4502
     and stop the recorded demo reproducing.
     """
-    writer = os.getenv("COCKROACH_WRITER_URL") or os.getenv("COCKROACH_URL")
+    # ADMIN_URL, not os.getenv("COCKROACH_URL") — by the time a POST arrives on
+    # a warm container, a previous GET may have repointed that at the reader.
+    writer = os.getenv("COCKROACH_WRITER_URL") or ADMIN_URL
     if not writer:
         return 503, {"ok": False, "error": "no write credential configured"}
     prev = os.environ.get("COCKROACH_URL")
@@ -122,6 +133,8 @@ def route_run() -> tuple[int, dict]:
         import sandbox
         return 200, {"ok": True, **sandbox.run()}
     finally:
+        # Restore whatever the previous request left, so a following read still
+        # goes through the reader.
         if prev is not None:
             os.environ["COCKROACH_URL"] = prev
 
