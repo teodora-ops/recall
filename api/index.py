@@ -90,18 +90,26 @@ class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         started = time.time()
         parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/") or "/"
         qs = parse_qs(parsed.query)
+
+        # The rewrite in vercel.json sends /api/<name> to /api/index, so the
+        # function never sees the path the caller asked for — it sees the
+        # destination. The original name is passed through as ?route= instead;
+        # the path is only a fallback for direct/local invocation.
+        route = (qs.get("route") or [None])[0]
+        if not route:
+            route = parsed.path.rstrip("/").rsplit("/", 1)[-1] or "index"
 
         status, body = 200, {}
         try:
             read_only = use_reader()
-            if path in ("/api/health", "/health"):
+            if route == "health":
                 body = route_health()
-            elif path in ("/api/replay", "/replay"):
+            elif route == "replay":
                 status, body = route_replay(qs)
             else:
-                status, body = 404, {"ok": False, "error": f"no route {path}"}
+                status, body = 404, {"ok": False,
+                                     "error": f"no route {route!r}"}
             body["read_only"] = read_only
         except Exception as e:  # noqa: BLE001
             status = 500
