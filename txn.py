@@ -99,13 +99,19 @@ class Outcome:
 
 
 def run_serializable(
-    work: Callable[[psycopg.Cursor, int], Any],
+    work: Callable[[psycopg.Cursor, int, list[str]], Any],
     *,
     max_attempts: int = 5,
     isolation: str = "serializable",
     conn: psycopg.Connection | None = None,
 ) -> Outcome:
-    """Run `work(cursor, attempt)` inside one transaction, retrying on 40001.
+    """Run `work(cursor, attempt, prior_sqlstates)` in one transaction, retrying on 40001.
+
+    `prior_sqlstates` is the list of failures already seen on this unit of
+    work, so the body can record that it is a retry and why. A decision that
+    knows it was forced to re-decide is the audit trail the race demo turns
+    on — "retried and succeeded" is a database feature, "retried, re-read
+    state and declined" is an agent one.
 
     `work` MUST be safe to run more than once, and MUST NOT make network
     calls. Both rules exist for the same reason: on a retry the whole body
@@ -137,7 +143,7 @@ def run_serializable(
             cur.execute("SHOW transaction_isolation")
             outcome.isolation = cur.fetchone()[0]
 
-            outcome.result = work(cur, attempt)
+            outcome.result = work(cur, attempt, list(outcome.sqlstates))
             c.commit()
             outcome.committed = True
             return outcome

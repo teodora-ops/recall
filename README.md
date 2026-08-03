@@ -31,7 +31,7 @@ health check at [`/api/health`](https://recall-memory.vercel.app/api/health)
 | # | Capability | What it demonstrates | Status |
 |---|---|---|---|
 | 1 | **Semantic recall** | Past cases embedded into a `VECTOR(1024)` column with a distributed C-SPANN index. A new case retrieves the closest historical resolutions as context — across channels, so an email case can surface a WhatsApp resolution. | **Working** — 300-case corpus, index use verified at scale |
-| 2 | **Transactional decisions** | The agent's decision and the action it authorises commit in a single serializable transaction. Two agents race the same refund; the second aborts, retries, sees the refund already happened, and does not double-pay. | Not started |
+| 2 | **Transactional decisions** | The agent's decision and the action it authorises commit in a single serializable transaction. Two agents race the same refund; the second aborts, retries, sees the refund already happened, and does not double-pay. | **Working** — real `40001`, with a READ COMMITTED control showing the double-pay |
 | 3 | **Point-in-time replay** | `AS OF SYSTEM TIME` reconstructs exactly what the agent knew at the moment of any past decision, plus a diff of what changed since. *"Why did the bot offer that discount?"* — **the headline feature.** | Mechanism verified, UI not built |
 | 4 | **Survivability** | Kill a node mid-conversation; the agent keeps its memory and keeps going. | Not started |
 
@@ -88,6 +88,9 @@ from `.env`.
 | `retention.py` | Holds every replay-path table at the required MVCC window |
 | `persona.py` | The fictional business the corpus describes — the human-editable part |
 | `seed.py` | Builds the corpus: hand-written hero cases + Nova Pro batches, cached |
+| `txn.py` | `run_serializable()`, the 40001 retry, and the AS OF SYSTEM TIME timestamp gate |
+| `agent.py` | One agent turn: recall and propose outside the transaction, decide and write inside it |
+| `race.py` | Two agents, one refund — and the isolation control |
 | `explain_check.py` | Whether the planner uses the vector index, filtered and unfiltered |
 | `spike_replay.py` | The four schema-gating questions, answered against the cluster |
 | `vector_index_check.py` | Probes whether the cluster indexes `VECTOR(1024)` |
@@ -417,7 +420,96 @@ catch exactly that and exits non-zero if any replay table is below target.
 
 ### 4. Serializable race — two agents, one refund
 
-*Not yet run. Output goes here when it is.*
+Jess Ellis is charged £34.98 twice for `ORD-4502` and reports it on **email**
+and on **WhatsApp**, minutes apart. Two agents pick it up. Both read the order,
+both see no refund yet, both conclude "refund £34.98".
+
+`python race.py`:
+
+```
+order      : ORD-4502 — Set of four stoneware mugs
+amount     : £34.98   already refunded: £0.00
+isolation  : serializable
+----------------------------------------------------------------------
+A  agent-email      attempts=1 committed=True isolation=serializable
+   decision : refund_full  £34.98
+B  agent-whatsapp   attempts=2 committed=True isolation=serializable sqlstates=['40001']
+   decision : decline_already_refunded  £0.00
+   aborted  : SQLSTATE 40001 on attempt 1, re-decided on attempt 2
+   conflicts: 2652b314
+   rationale: Order ORD-4502 is already fully refunded (£34.98). No further refund due.
+----------------------------------------------------------------------
+decisions written : 2
+   agent-email      refund_full                £ 34.98  attempt=1
+   agent-whatsapp   decline_already_refunded   £  0.00  attempt=2  aborted=40001
+actions written   : 1
+money actually out: £34.98
+order says refunded: £34.98
+----------------------------------------------------------------------
+[ OK ]  exactly one refund action
+[ OK ]  money out equals order value
+[ OK ]  ledger agrees with money out
+[ OK ]  both agents recorded a decision
+[ OK ]  a serialization failure was observed
+[ OK ]  the loser declined rather than refunded
+```
+
+**The retry produces a different decision, and that is the whole point.**
+"Retried and succeeded" is a database feature. "Retried, re-read the world, and
+correctly declined" is an agent one. The declined decision is still written, so
+the audit trail records that a second agent considered this refund and refused
+it — `attempt=2`, `abort_sqlstate=40001`, `conflicts_with` naming the winner.
+
+**Why the assertions are not about the final amount.** The order update is an
+absolute assignment computed in Python, so a lost update and a correct abort
+leave the *same* `refunded_minor`. The number cannot distinguish them. Only the
+observed `40001`, the row count in `actions`, and whether the loser declined
+can — so those are what the harness asserts, and the amount is merely reported.
+
+### 4b. The control — the same code, one isolation level down
+
+`python race.py --control` runs the bare read-modify-write on the order,
+stripped of everything else, at each isolation level:
+
+```
+isolation          : read committed
+refunds authorised : 2  (committed: ['B', 'A'])
+aborted            : 0  []
+order says refunded: £34.98
+
+LOST UPDATE. Two agents each authorised a £34.98 refund and both committed.
+The customer is owed £34.98 and has been refunded £69.96, while the order row
+still claims £34.98. The money and the ledger disagree, and nothing errored.
+```
+
+```
+isolation          : serializable
+refunds authorised : 1  (committed: ['A'])
+aborted            : 1  ['B']
+
+One refund authorised, one transaction aborted. The database refused the
+second write.
+```
+
+That is the cost of the weaker isolation level, measured rather than asserted:
+**£69.96 out against a £34.98 order, with a ledger that reads £34.98 and not a
+single error raised.**
+
+**And a stronger finding underneath it.** The control cannot write decision
+rows at all, because `cluster_logical_timestamp()` is *unsupported* under READ
+COMMITTED:
+
+```
+[ OK ]   cluster_logical_timestamp() under serializable: 1785759733163042399
+[FAIL]   cluster_logical_timestamp() under read committed
+         -> unsupported in READ COMMITTED isolation
+```
+
+Under READ COMMITTED every statement gets its own snapshot, so there is no
+single transaction timestamp to record — and therefore no replay anchor. The
+headline feature does not merely work *better* at SERIALIZABLE; it cannot be
+recorded without it. Capabilities 2 and 3 turn out to be the same mechanism
+viewed from two angles.
 
 ### 5. Node kill — survivability
 

@@ -229,7 +229,7 @@ def handle(message: str, order_id: str, agent_id: str,
     recalled_dist = [float(c["distance"]) for c in recalled]
 
     # ---- PHASE B: decide and write, inside one transaction ----
-    def work(cur, attempt):
+    def work(cur, attempt, prior_sqlstates):
         # The conflicting read. Two agents both land here before either
         # writes, which is what SERIALIZABLE detects.
         cur.execute(
@@ -239,22 +239,35 @@ def handle(message: str, order_id: str, agent_id: str,
         order = dict(zip(cols, cur.fetchone()))
 
         if barrier:
-            barrier("after_read")
+            barrier("after_read", attempt)
 
         decision = policy_gate(proposal, order)
+
+        # If this is a retry, record what forced it and who won. Visible now
+        # precisely because the winner committed before this attempt began.
+        aborted_with = prior_sqlstates[-1] if prior_sqlstates else None
+        conflicts_with = None
+        if aborted_with:
+            cur.execute(
+                "SELECT decision_id FROM decisions WHERE order_id = %s "
+                "AND decision_kind IN ('refund_full','refund_partial') "
+                "ORDER BY decision_hlc DESC LIMIT 1", (order_id,))
+            row = cur.fetchone()
+            conflicts_with = row[0] if row else None
 
         cur.execute(
             """INSERT INTO decisions
                  (agent_id, case_id, order_id, customer_ref, decision_kind,
                   amount_minor, rationale, chat_model, query_text,
                   query_embedding, recalled_case_ids, recalled_distances,
-                  attempt)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::VECTOR(1024),%s,%s,%s)
+                  attempt, abort_sqlstate, conflicts_with)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::VECTOR(1024),%s,%s,%s,%s,%s)
                RETURNING decision_id, decision_hlc""",
             (agent_id, case_id, order_id, order_snapshot["customer_ref"],
              decision.kind, decision.amount_minor, decision.rationale,
              proposal.model, message, query_vec,
-             recalled_ids, recalled_dist, attempt),
+             recalled_ids, recalled_dist, attempt,
+             aborted_with, conflicts_with),
         )
         decision_id, decision_hlc = cur.fetchone()
 
@@ -277,9 +290,12 @@ def handle(message: str, order_id: str, agent_id: str,
             acted = True
 
         if barrier:
-            barrier("before_commit")
+            barrier("before_commit", attempt)
 
         return {
+            "attempt": attempt,
+            "abort_sqlstate": aborted_with,
+            "conflicts_with": str(conflicts_with) if conflicts_with else None,
             "decision_id": str(decision_id),
             "decision_hlc": str(decision_hlc),
             "kind": decision.kind,
