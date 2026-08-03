@@ -176,6 +176,32 @@ DRIFT_CASES = [
 ]
 
 
+def drift_reset() -> None:
+    """Put the world back to before drift, so the demo can be run again.
+
+    Drift is one-way by nature: it adds cases and closes open ones. Run the
+    demo twice and the second replay diff is empty, because there is nothing
+    left to change — which is exactly what happened the first time this was
+    recorded. Resetting makes the sequence
+    `--drift --reset` -> `race.py` -> `--drift` reproducible, which matters
+    for re-recording the video and for anyone reproducing the evidence.
+    """
+    with db.connect() as conn:
+        cur = conn.cursor()
+        subjects = [c[2] for c in DRIFT_CASES]
+        cur.execute("DELETE FROM cases WHERE subject = ANY(%s)", (subjects,))
+        print(f"removed {cur.rowcount} drift case(s)")
+
+        # Re-open the hero cases that were open in the original corpus, so
+        # there is something for drift to close again.
+        reopen = [c["subject"] for c in persona.HERO_CASES
+                  if c["resolution"] is None]
+        cur.execute(
+            "UPDATE cases SET resolution = NULL, outcome = NULL, "
+            "resolved_at = NULL WHERE subject = ANY(%s)", (reopen,))
+        print(f"re-opened {cur.rowcount} hero case(s): {', '.join(reopen)}")
+
+
 def drift(embed: bool = True) -> None:
     """Make the world move after decisions were recorded.
 
@@ -262,6 +288,8 @@ def main():
     ap.add_argument("--apply", action="store_true", help="actually write rows")
     ap.add_argument("--drift", action="store_true",
                     help="move the world on, so the replay diff is non-empty")
+    ap.add_argument("--reset", action="store_true",
+                    help="with --drift: undo previous drift first")
     ap.add_argument("--embed", action="store_true", help="embed after seeding")
     ap.add_argument("--cases", type=int, default=TARGET_CASES)
     ap.add_argument("--force", action="store_true",
@@ -269,7 +297,11 @@ def main():
     args = ap.parse_args()
 
     if args.drift:
-        drift()
+        db.safe_console()
+        if args.reset:
+            drift_reset()
+        else:
+            drift()
         return
 
     db.safe_console()

@@ -159,6 +159,26 @@ python explain_check.py               # is the planner using the vector index?
 python recall.py search "you took the money off my card two times"
 ```
 
+Then the demos, in this order — it matters:
+
+```bash
+python create_reader.py --password '<pw>'   # BEFORE recording anything to replay
+python create_reader.py --password '<pw>' --verify
+
+python seed.py --drift --reset   # undo any previous drift
+python race.py                   # two agents, one refund  -> Evidence 4
+python race.py --control         # the same code at READ COMMITTED -> Evidence 4b
+python seed.py --drift           # move the world on, AFTER the decisions
+python replay.py list
+python replay.py diff <id>       # -> Evidence 6
+```
+
+Two ordering constraints, both learned the hard way. The reader must exist
+**before** the decisions you intend to replay, because CockroachDB resolves role
+identity at the historical timestamp and a role cannot read a snapshot from
+before it existed. And drift must run **after** the race, or there is nothing
+changed to diff and the headline feature renders an empty panel.
+
 ### A note on embedding cost
 
 Every vector Bedrock returns is cached to `.cache/embeddings/`, keyed by
