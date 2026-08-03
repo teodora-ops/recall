@@ -369,6 +369,30 @@ The row is gone at present time and fully reconstructed at the captured
 timestamp. This is the mechanism the whole replay feature rests on, working on
 the real table rather than in principle.
 
+**The commit timestamp is inclusive, which the replay code has to account
+for.** `cluster_logical_timestamp()` returns the transaction's *commit*
+timestamp, and `AS OF SYSTEM TIME` at that exact value already contains the
+transaction's own writes. Measured on the live cluster against a real agent
+decision:
+
+```
+AS OF decision_hlc      -> refunded_minor = 3498, decision row visible
+AS OF decision_hlc - 1  -> refunded_minor = 0,    decision row absent
+```
+
+Reading at `decision_hlc` therefore reconstructs the world *after* the
+decision, not the world it was made in — the opposite of what replay needs.
+One logical tick earlier is the last instant before the transaction's effects
+landed, which is exactly what the agent observed. `txn.read_snapshot()` does
+that subtraction and every replay query goes through it.
+
+Related: `AS OF SYSTEM TIME` rejects placeholders — *"only constant
+expressions, with_min_timestamp, with_max_staleness, or
+follower_read_timestamp are allowed"*. The timestamp must be interpolated as
+text, so `txn.validate_hlc()` gates it with a strict pattern plus a `Decimal`
+round-trip the value must survive unchanged. `now()`, `1e9`, `-1` and
+`'...' OR '1'='1` are all rejected before any string reaches SQL.
+
 **The retention window is load-bearing and easy to get wrong.** This cluster's
 default range is `gc.ttlseconds = 4500` — 75 minutes. `AS OF SYSTEM TIME`
 cannot read older than that window, so a replay of yesterday's decision would

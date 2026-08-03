@@ -167,11 +167,20 @@ CREATE TABLE IF NOT EXISTS decisions (
     --
     -- Verified legal as a DEFAULT on v26.2.1 by spike_replay.py, spike A.
     --
-    -- Caveat worth stating rather than hiding: under SERIALIZABLE a
-    -- transaction's timestamp can be pushed before commit, so this is the
-    -- read snapshot — the world the agent read, in which its own decision row
-    -- does not yet exist. Replay therefore reads the decision at present time
-    -- and everything it reasoned over AS OF this value.
+    -- IMPORTANT, and measured rather than assumed: this is the transaction's
+    -- COMMIT timestamp, and AS OF SYSTEM TIME at this exact value is
+    -- INCLUSIVE of the transaction's own writes. Reading the order here shows
+    -- the refund already applied and the decision row already present — the
+    -- world *after* the decision, not the world it was made in.
+    --
+    -- To reconstruct what the agent actually read, replay must read one
+    -- logical tick earlier. Confirmed on the live cluster:
+    --
+    --     AS OF decision_hlc      -> refunded_minor = 3498, decision visible
+    --     AS OF decision_hlc - 1  -> refunded_minor = 0,    decision absent
+    --
+    -- txn.read_snapshot() does that subtraction, and is what every replay
+    -- query goes through.
     decision_hlc  DECIMAL NOT NULL DEFAULT cluster_logical_timestamp(),
 
     -- Humans only. Never feed this to AS OF SYSTEM TIME: wall-clock at
