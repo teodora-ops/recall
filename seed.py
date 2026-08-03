@@ -159,14 +159,118 @@ def upload_body(case_id: str, body: str) -> str | None:
     return key
 
 
+DRIFT_CASES = [
+    # Deliberately close to the duplicate-charge query, so they enter the
+    # top-5 and the retrieval diff has something real in it.
+    ("webchat", "OKONKWO-A", "Billed twice for the same order",
+     "My card shows two identical charges for one order placed this morning. "
+     "Could you take the second one off?",
+     "Refunded the duplicate charge same day.", "refund"),
+    ("email", "SINCLAIR-R", "Duplicate payment taken",
+     "Two payments of the same amount left my account for a single order. "
+     "I'd like the second returned please.",
+     "Confirmed duplicate authorisation and refunded it.", "refund"),
+    ("whatsapp", "MURRAY-E", "paid twice by mistake",
+     "hi ive been charged for my order twice, can you refund one of them",
+     None, None),
+]
+
+
+def drift(embed: bool = True) -> None:
+    """Make the world move after decisions were recorded.
+
+    Replay's whole claim is that it shows what has changed *since* a decision.
+    If the corpus is frozen at seed time, the retrieval diff is always empty
+    and the headline feature demos as a blank panel — technically correct and
+    completely unconvincing.
+
+    So: add cases the same query would now rank highly, and resolve one that
+    was open when the agent read it. Both are ordinary business events; they
+    just have to happen after the decision, not before.
+    """
+    db.safe_console()
+    now = datetime.now(timezone.utc)
+    with db.connect() as conn:
+        cur = conn.cursor()
+
+        # Idempotent: running drift twice should not double the corpus with
+        # near-identical cases, which pollutes the very retrieval diff it
+        # exists to populate.
+        added, skipped = [], 0
+        for channel, ref, subject, body, resolution, outcome in DRIFT_CASES:
+            cur.execute(
+                "SELECT count(*) FROM cases WHERE subject = %s AND "
+                "customer_ref = %s", (subject, ref))
+            if cur.fetchone()[0]:
+                skipped += 1
+                continue
+            cur.execute(
+                """INSERT INTO cases (channel, customer_ref, subject, body,
+                       resolution, outcome, opened_at, resolved_at)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING case_id""",
+                (channel, ref, subject, body, resolution, outcome, now,
+                 now if resolution else None))
+            added.append((str(cur.fetchone()[0]), body))
+        print(f"added {len(added)} case(s) dated now"
+              + (f", skipped {skipped} already present" if skipped else ""))
+
+        for cid, body in added:
+            key = upload_body(cid, body)
+            if key:
+                cur.execute("UPDATE cases SET s3_key=%s WHERE case_id=%s",
+                            (key, cid))
+
+        # Resolve a case that an agent actually RECALLED and that was still
+        # open when it did. That is what produces the strongest line in the
+        # diff — "case #1 was open when the agent read it, and has since been
+        # resolved" — rather than a change to some case nobody consulted.
+        cur.execute(
+            """SELECT c.case_id, c.subject
+               FROM cases c
+               WHERE c.resolution IS NULL
+                 AND c.case_id IN (
+                     SELECT unnest(d.recalled_case_ids) FROM decisions d
+                 )
+               LIMIT 1""")
+        row = cur.fetchone()
+        if not row:
+            # Nothing recalled is open; fall back to any open billing case.
+            cur.execute(
+                """SELECT case_id, subject FROM cases
+                   WHERE resolution IS NULL
+                     AND (subject ILIKE '%charge%' OR subject ILIKE '%twice%'
+                          OR subject ILIKE '%double%')
+                   ORDER BY opened_at DESC LIMIT 1""")
+            row = cur.fetchone()
+        if row:
+            cid, subject = row
+            cur.execute(
+                """UPDATE cases SET resolution = %s, outcome = 'refund',
+                       resolved_at = %s WHERE case_id = %s""",
+                ("Duplicate charge confirmed and refunded in full.", now, cid))
+            print(f"resolved a previously-open case: {subject}")
+        else:
+            print("no open duplicate-charge case to resolve")
+
+    if embed:
+        n = recall.backfill()
+        print(f"embedded {n} new case(s)")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true", help="actually write rows")
+    ap.add_argument("--drift", action="store_true",
+                    help="move the world on, so the replay diff is non-empty")
     ap.add_argument("--embed", action="store_true", help="embed after seeding")
     ap.add_argument("--cases", type=int, default=TARGET_CASES)
     ap.add_argument("--force", action="store_true",
                     help="seed even if cases already holds rows")
     args = ap.parse_args()
+
+    if args.drift:
+        drift()
+        return
 
     db.safe_console()
     rng = random.Random(SEED)

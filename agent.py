@@ -260,14 +260,16 @@ def handle(message: str, order_id: str, agent_id: str,
                  (agent_id, case_id, order_id, customer_ref, decision_kind,
                   amount_minor, rationale, chat_model, query_text,
                   query_embedding, recalled_case_ids, recalled_distances,
-                  attempt, abort_sqlstate, conflicts_with)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::VECTOR(1024),%s,%s,%s,%s,%s)
+                  attempt, abort_sqlstate, conflicts_with,
+                  proposed_kind, proposed_amount_minor)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::VECTOR(1024),%s,%s,%s,%s,%s,%s,%s)
                RETURNING decision_id, decision_hlc""",
             (agent_id, case_id, order_id, order_snapshot["customer_ref"],
              decision.kind, decision.amount_minor, decision.rationale,
              proposal.model, message, query_vec,
              recalled_ids, recalled_dist, attempt,
-             aborted_with, conflicts_with),
+             aborted_with, conflicts_with,
+             proposal.kind, proposal.amount_minor),
         )
         decision_id, decision_hlc = cur.fetchone()
 

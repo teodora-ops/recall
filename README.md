@@ -32,7 +32,7 @@ health check at [`/api/health`](https://recall-memory.vercel.app/api/health)
 |---|---|---|---|
 | 1 | **Semantic recall** | Past cases embedded into a `VECTOR(1024)` column with a distributed C-SPANN index. A new case retrieves the closest historical resolutions as context — across channels, so an email case can surface a WhatsApp resolution. | **Working** — 300-case corpus, index use verified at scale |
 | 2 | **Transactional decisions** | The agent's decision and the action it authorises commit in a single serializable transaction. Two agents race the same refund; the second aborts, retries, sees the refund already happened, and does not double-pay. | **Working** — real `40001`, with a READ COMMITTED control showing the double-pay |
-| 3 | **Point-in-time replay** | `AS OF SYSTEM TIME` reconstructs exactly what the agent knew at the moment of any past decision, plus a diff of what changed since. *"Why did the bot offer that discount?"* — **the headline feature.** | Mechanism verified, UI not built |
+| 3 | **Point-in-time replay** | `AS OF SYSTEM TIME` reconstructs exactly what the agent knew at the moment of any past decision, plus a diff of what changed since. *"Why did the bot offer that discount?"* — **the headline feature.** | **Working** in the CLI, with an exact counterfactual; UI is Phase 6 |
 | 4 | **Survivability** | Kill a node mid-conversation; the agent keeps its memory and keeps going. | Not started |
 
 Capabilities 2 and 3 are the ones that cannot be swapped onto another
@@ -91,6 +91,7 @@ from `.env`.
 | `txn.py` | `run_serializable()`, the 40001 retry, and the AS OF SYSTEM TIME timestamp gate |
 | `agent.py` | One agent turn: recall and propose outside the transaction, decide and write inside it |
 | `race.py` | Two agents, one refund — and the isolation control |
+| `replay.py` | Reconstruct what an agent knew, and diff it against now |
 | `explain_check.py` | Whether the planner uses the vector index, filtered and unfiltered |
 | `spike_replay.py` | The four schema-gating questions, answered against the cluster |
 | `vector_index_check.py` | Probes whether the cluster indexes `VECTOR(1024)` |
@@ -517,7 +518,82 @@ viewed from two angles.
 
 ### 6. Replay diff — what the agent knew, and what changed since
 
-*Not yet run. Output goes here when it is.*
+The headline. `python replay.py diff fc4fbba6` against the winning decision
+from the race above:
+
+```
+decision   : fc4fbba6-609c-4519-b1bb-5bfbc063bfb4
+agent      : agent-email   2026-08-03 12:47:01+00:00
+decided    : refund_full  £34.98
+snapshot   : 1785761221071400222.000000000
+==========================================================================
+WHAT IT SAW
+  order ORD-4502: Set of four stoneware mugs, £34.98, already refunded £0.00
+  #1 [email   ] Charged twice for order 4502
+      -> (still open)
+  #2 [whatsapp] double charge
+      -> the duplicate charge was refunded.
+  #3 [webchat ] Duplicate Charge
+      -> Duplicate charge was refunded.
+  #4 [whatsapp] double charged
+      -> (still open)
+  #5 [email   ] Double Charge on Order ORD-1067
+      -> The duplicate charge was refunded to the customer's account.
+--------------------------------------------------------------------------
+WHAT CHANGED SINCE
+  order.refunded_minor: £0.00 -> £34.98
+  case "Charged twice for order 4502" resolution:
+      then: None
+      now : Duplicate charge confirmed and refunded in full.
+  case "double charged" resolution:
+      then: None
+      now : Duplicate charge confirmed and refunded in full.
+  entered top-5 at #2: paid twice by mistake
+  left top-5 (was #5): Double Charge on Order ORD-1067
+  moved #3 -> #4: Duplicate Charge
+  later: agent-whatsapp decline_already_refunded £0.00 (after 40001)
+--------------------------------------------------------------------------
+COUNTERFACTUAL — same intent (refund_full), judged again
+  against the world it saw : refund_full
+  against the world today  : decline_already_refunded
+  THE DECISION WOULD FLIP. Same agent, same intent, different memory.
+```
+
+**Why this is not a text column.** Every database can store a rationale
+string. What is reconstructed above is the *evidence*: the order as it stood,
+the five cases the agent recalled with their resolutions at that instant, and
+the same query vector re-run against the corpus as it was. Two of those cases
+were **still open** when the agent read them and have since been resolved — so
+the record shows the agent acting on genuinely incomplete information, which no
+amount of after-the-fact logging would reveal.
+
+**The counterfactual is exact, not estimated.** Authorisation lives in a pure
+function, so replay re-runs the original *intent* against both worlds for the
+cost of a function call. The same agent, given the same instruction and today's
+memory, would decline.
+
+Three properties make this hold up:
+
+- **One snapshot for the whole diff.** The reconstruction touches four tables,
+  so it runs inside `BEGIN AS OF SYSTEM TIME` rather than four independently
+  timestamped statements that could disagree.
+- **No model call.** The query vector is stored on the decision, so replay
+  re-runs the exact historical query. Deterministic, free, unaffected by a
+  later `BEDROCK_EMBED_MODEL` swap — and runnable from a deployed page with no
+  AWS credentials at all.
+- **No diff logic in the UI.** The web page renders exactly what `diff()`
+  returns, so the terminal output above and the deployed demo are provably the
+  same code path.
+
+**A bug worth recording, because it failed convincingly.** The first working
+version read the query vector inside the historical snapshot — but at that
+timestamp the decision row does not exist yet, it committed one tick later. The
+subquery returned NULL, every distance became NULL, and the "nearest cases as
+they were" came back in arbitrary order. The output looked entirely plausible:
+five real cases, five real subjects, nothing obviously broken. It was only
+visible because the diff claimed all five results had *entered* the top five
+and five unrelated cases had *left* it. The vector is now read at present time
+and carried into the past.
 
 ---
 

@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS cases (
 -- patched on an existing one; both paths converge here. Any future column
 -- needs the same treatment.
 ALTER TABLE cases ADD COLUMN IF NOT EXISTS s3_key STRING;
+ALTER TABLE decisions ADD COLUMN IF NOT EXISTS proposed_kind STRING;
+ALTER TABLE decisions ADD COLUMN IF NOT EXISTS proposed_amount_minor INT;
 
 
 -- The distributed (C-SPANN) vector index.
@@ -146,6 +148,16 @@ CREATE TABLE IF NOT EXISTS decisions (
     currency      STRING NOT NULL DEFAULT 'GBP',
     rationale     STRING,                   -- the model's words, not its authority
     chat_model    STRING,
+
+    -- What the model PROPOSED, before the policy gate ruled on it. Kept
+    -- separate from decision_kind, which is what was actually authorised.
+    --
+    -- Replay needs both. The counterfactual asks "would the same intent be
+    -- authorised against today's state?", and that question is only exact if
+    -- the original intent was recorded rather than inferred backwards from
+    -- the outcome.
+    proposed_kind         STRING,
+    proposed_amount_minor INT,
 
     -- What the agent actually saw, pinned rather than reconstructed.
     --
