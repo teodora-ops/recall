@@ -128,6 +128,7 @@ from `.env`.
 | `replay.py` | Reconstruct what an agent knew, and diff it against now |
 | `sandbox.py` | The live "run a new case" path, with no model call |
 | `create_reader.py` | The read-only SQL user, and proof it cannot write |
+| `mcp.json` | MCP server config for analyst access, through the read-only user |
 | `apply_schema.py` | Idempotent schema applier; prints what landed |
 | `retention.py` | Holds every replay-path table at the required MVCC window |
 | `persona.py` | The fictional business the corpus describes — the human-editable part |
@@ -624,6 +625,29 @@ Three things this check caught that `GRANT` alone did not fix:
   historical timestamp, and the role did not exist in that past. **A read-only
   user cannot replay history from before it was created** — so create the reader
   before recording anything you intend to replay.
+
+### 4d. Analyst access over MCP, read-only
+
+`mcp.json` points an MCP client at the memory store through `recall_reader`.
+An analyst can then ask questions of the corpus, the decisions and the actions
+in natural language — including historical ones, because `AS OF SYSTEM TIME`
+works for that user too. Verified connected as the reader:
+
+```
+connected as: recall_reader
+
+decisions by kind:
+  refund_partial               3
+  refund_full                  1
+  decline_already_refunded     1
+decisions forced to retry by a serialization conflict: 2
+ORD-4502 refunded: then=0 now=3498   <- time travel works for the analyst
+```
+
+The read-only credential matters more here than anywhere else. An analyst tool
+that could write might alter the history it is meant to be reporting on, and
+pointing an LLM at that tool sharpens the problem rather than softening it. The
+same `42501` boundary shown in 4c applies.
 
 ### 5. Node kill — survivability
 

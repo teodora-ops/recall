@@ -1,0 +1,28 @@
+{
+  "$comment": [
+    "MCP server configuration for analyst access to Recall's memory.",
+    "",
+    "Point an MCP client (Claude Desktop, Claude Code, or any other) at this",
+    "and it can query the corpus, the decisions and the actions — including",
+    "AS OF SYSTEM TIME, so an analyst can ask what an agent knew at the time",
+    "rather than only what is true now.",
+    "",
+    "It connects as recall_reader, NOT recall_admin. That is the point: an",
+    "analyst tool with write access could alter the history it is meant to be",
+    "reporting on, and an LLM driving that tool makes the distinction sharper",
+    "rather than softer. create_reader.py --verify proves the boundary: every",
+    "write refused with SQLSTATE 42501.",
+    "",
+    "Set COCKROACH_READER_URL in your environment first — the same value the",
+    "deployed app uses. It is never committed."
+  ],
+  "mcpServers": {
+    "recall-memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres"],
+      "env": {
+        "POSTGRES_CONNECTION_STRING": "${COCKROACH_READER_URL}"
+      }
+    }
+  }
+}
