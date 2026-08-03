@@ -200,7 +200,9 @@ def handle(message: str, order_id: str, agent_id: str,
            case_id: str | None = None,
            proposal: Proposal | None = None,
            barrier: Callable[[str], None] | None = None,
-           isolation: str = "serializable") -> txn.Outcome:
+           isolation: str = "serializable",
+           query_vec: str | None = None,
+           recalled: list[dict] | None = None) -> txn.Outcome:
     """Run one full agent turn and return how the transaction went.
 
     `barrier` is a hook the race harness uses to force a deterministic
@@ -220,11 +222,18 @@ def handle(message: str, order_id: str, agent_id: str,
         cols = [d.name for d in cur.description]
         order_snapshot = dict(zip(cols, row))
 
-    recalled = recall_context(message)
+    # Every Bedrock call in this function is skippable by supplying the
+    # result. The deployed "run a new case" button does exactly that: it
+    # passes a stored query vector, the recalled set, and a fixed proposal,
+    # so a public endpoint runs a genuine serializable transaction without
+    # any AWS credentials on the deployment and without a per-click cost.
+    if recalled is None:
+        recalled = recall_context(message)
     if proposal is None:
         proposal = propose(message, recalled, order_snapshot)
+    if query_vec is None:
+        query_vec = embeddings.to_sql(embeddings.embed(message))
 
-    query_vec = embeddings.to_sql(embeddings.embed(message))
     recalled_ids = [str(c["case_id"]) for c in recalled]
     recalled_dist = [float(c["distance"]) for c in recalled]
 

@@ -102,7 +102,55 @@ def route_replay(qs: dict) -> tuple[int, dict]:
     return 200, {"ok": True, **replay.diff(str(matches[0][0]))}
 
 
+def route_run() -> tuple[int, dict]:
+    """Run one agent turn live, on a throwaway order.
+
+    Writes, so it needs a write credential — COCKROACH_WRITER_URL if one is
+    configured, otherwise COCKROACH_URL. Reads elsewhere still go through the
+    reader; only this route escalates, and only to write rows it created.
+
+    It never touches the hero order: each run mints its own SANDBOX-xxxxxxxx.
+    A judge in September must not be able to exhaust the refund on ORD-4502
+    and stop the recorded demo reproducing.
+    """
+    writer = os.getenv("COCKROACH_WRITER_URL") or os.getenv("COCKROACH_URL")
+    if not writer:
+        return 503, {"ok": False, "error": "no write credential configured"}
+    prev = os.environ.get("COCKROACH_URL")
+    os.environ["COCKROACH_URL"] = writer
+    try:
+        import sandbox
+        return 200, {"ok": True, **sandbox.run()}
+    finally:
+        if prev is not None:
+            os.environ["COCKROACH_URL"] = prev
+
+
 class handler(BaseHTTPRequestHandler):
+    def _send(self, status, body, started):
+        body["ms"] = int((time.time() - started) * 1000)
+        payload = json.dumps(body, indent=2, default=str).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def do_POST(self):
+        started = time.time()
+        route = (parse_qs(urlparse(self.path).query).get("route") or [""])[0] \
+            or urlparse(self.path).path.rstrip("/").rsplit("/", 1)[-1]
+        try:
+            if route == "run":
+                status, body = route_run()
+            else:
+                status, body = 404, {"ok": False, "error": f"no route {route!r}"}
+        except Exception as e:  # noqa: BLE001
+            status, body = 500, {"ok": False,
+                                 "error": f"{type(e).__name__}: "
+                                          f"{str(e).splitlines()[0][:300]}"}
+        self._send(status, body, started)
+
     def do_GET(self):
         started = time.time()
         parsed = urlparse(self.path)

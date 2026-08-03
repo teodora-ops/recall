@@ -58,6 +58,12 @@
   footer { margin-top:3rem; color:var(--muted); font-size:.84rem }
   a { color:var(--accent) }
   .scroll { overflow-x:auto }
+  button { font:inherit; font-weight:550; padding:.5rem 1rem; border-radius:8px;
+           border:1px solid color-mix(in oklab,var(--accent) 45%,var(--line));
+           background:color-mix(in oklab,var(--accent) 12%,var(--card));
+           color:var(--fg); cursor:pointer }
+  button:hover { background:color-mix(in oklab,var(--accent) 20%,var(--card)) }
+  button:disabled { opacity:.55; cursor:default }
 </style>
 </head>
 <body>
@@ -75,6 +81,17 @@
   what each knew when it decided.</p>
   <div class="grid" id="hero"></div>
   <div id="flip"></div>
+
+  <h2>Run one now</h2>
+  <p class="sub">Nothing above is a recording. This mints a throwaway order,
+  runs an agent turn in a real serializable transaction, and the resulting
+  decision is replayable immediately — it appears at the top of the timeline.
+  It never touches the order above.</p>
+  <div class="card">
+    <button id="run">Run a new case</button>
+    <span class="meta" id="run-note" style="margin-left:.75rem"></span>
+    <div id="run-out"></div>
+  </div>
 
   <h2>Decision timeline</h2>
   <p class="sub">Click any row to reconstruct it.</p>
@@ -178,6 +195,37 @@ function renderSide(r){
     ${recalled || '<div class="empty">nothing recalled</div>'}
   </div>`;
 }
+
+document.getElementById('run').addEventListener('click', async (ev) => {
+  const btn = ev.target;
+  btn.disabled = true;
+  $('#run-note').textContent = 'running a serializable transaction…';
+  $('#run-out').innerHTML = '';
+  try {
+    const r = await (await fetch('/api/run', {method:'POST'})).json();
+    if (!r.ok) { $('#run-note').textContent = ''; 
+      $('#run-out').innerHTML = `<div class="card" style="margin-top:.8rem">${esc(r.error)}</div>`;
+      btn.disabled = false; return; }
+    $('#run-note').textContent = `${r.ms} ms · ${r.attempts} attempt(s) · ${esc(r.isolation)}`;
+    $('#run-out').innerHTML = `<div style="margin-top:.9rem">
+      <div class="meta">${esc(r.order_id)} — ${esc(r.item)} ${money(r.amount_minor)}</div>
+      <div class="amount"><span class="kind ${kindClass(r.decision_kind)}">${esc(r.decision_kind)}</span>
+        &nbsp;${money(r.decision_amount_minor)}</div>
+      <div>${esc(r.rationale)}</div>
+      <div class="meta" style="margin-top:.5rem">recalled ${r.recalled} case(s) ·
+        rationale is pre-written, no model call — the transaction, the policy
+        gate and the replay anchor are real</div>
+      <div style="margin-top:.6rem"><a href="#" data-replay="${esc(r.decision_id)}">replay this decision →</a></div>
+    </div>`;
+    const link = $('#run-out a[data-replay]');
+    if (link) link.addEventListener('click', e => {
+      e.preventDefault(); showDetail(link.dataset.replay); });
+  } catch (e) {
+    $('#run-note').textContent = '';
+    $('#run-out').innerHTML = `<div class="card" style="margin-top:.8rem">${esc(e)}</div>`;
+  }
+  btn.disabled = false;
+});
 
 async function showDetail(id){
   $('#detail-h').style.display = '';
