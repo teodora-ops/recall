@@ -77,14 +77,27 @@ def control(isolation: str) -> None:
     application code, write an absolute value back. Exactly what both agents
     do, stripped of everything else.
     """
+    import secrets
+
     import psycopg
 
+    # The control gets its OWN order. It used to contend on ORD-4502 and reset
+    # it afterwards, which silently deleted the race decisions the hero screen
+    # and the replay demo depend on — running the control after the race wiped
+    # the evidence the race had just produced.
+    control_order = f"CONTROL-{secrets.token_hex(4)}"
+    amount = 3498
+
     with db.connect() as c:
-        reset(c.cursor())
         cur = c.cursor()
-        cur.execute("SELECT amount_minor FROM orders WHERE order_id = %s",
-                    (ORDER_ID,))
-        amount = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO customers (customer_ref, display_name) "
+            "VALUES ('CONTROL-DEMO','Control Demo') "
+            "ON CONFLICT (customer_ref) DO NOTHING")
+        cur.execute(
+            "INSERT INTO orders (order_id, customer_ref, item, amount_minor) "
+            "VALUES (%s,'CONTROL-DEMO','Set of four stoneware mugs',%s)",
+            (control_order, amount))
 
     both_read = threading.Barrier(2)
     committed, aborted = [], []
@@ -95,12 +108,12 @@ def control(isolation: str) -> None:
                 cur = w.cursor()
                 cur.execute(f"SET TRANSACTION ISOLATION LEVEL {isolation}")
                 cur.execute("SELECT refunded_minor FROM orders "
-                            "WHERE order_id = %s", (ORDER_ID,))
+                            "WHERE order_id = %s", (control_order,))
                 seen = cur.fetchone()[0]
                 both_read.wait(timeout=30)          # both have read 0
                 # Application-side read-modify-write, absolute assignment.
                 cur.execute("UPDATE orders SET refunded_minor = %s "
-                            "WHERE order_id = %s", (seen + amount, ORDER_ID))
+                            "WHERE order_id = %s", (seen + amount, control_order))
                 w.commit()
                 committed.append(name)
         except psycopg.errors.SerializationFailure:
@@ -117,10 +130,11 @@ def control(isolation: str) -> None:
     with db.connect() as c:
         cur = c.cursor()
         cur.execute("SELECT refunded_minor FROM orders WHERE order_id = %s",
-                    (ORDER_ID,))
+                    (control_order,))
         final = cur.fetchone()[0]
 
     print(f"isolation          : {isolation}")
+    print(f"order              : {control_order} (its own — never ORD-4502)")
     print(f"refunds authorised : {len(committed)}  (committed: {committed})")
     print(f"aborted            : {len(aborted)}  {aborted}")
     print(f"order amount       : £{amount / 100:.2f}")
@@ -138,9 +152,6 @@ def control(isolation: str) -> None:
               "refused the second write.")
     else:
         print("Neither committed — inconclusive, re-run.")
-
-    with db.connect() as c:
-        reset(c.cursor())
 
 
 def main():
