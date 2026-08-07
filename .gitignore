@@ -8,3 +8,5 @@ CLAUDE.md
 __pycache__/
 *.pyc
 node_modules/
+# Working notes for the video, not project documentation
+RECORDING.md
