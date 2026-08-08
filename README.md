@@ -104,6 +104,17 @@ whatsapp ─┼─→  agent  ───────────────→  
 | Deployed demo | Vercel — static frontend and the read-only replay API |
 | Analyst access | CockroachDB Cloud **managed MCP server**, read-only |
 
+**All of it runs on AWS, in one region.** The CockroachDB Cloud cluster is
+hosted on AWS in `eu-west-2`, across three availability zones — `SHOW REGIONS`
+reports `aws-eu-west-2` with zones `aws-eu-west-2a/b/c`. Lambda, Bedrock and S3
+are in the same region. Only the static page and the read-only replay API sit on
+Vercel, and that is the one piece holding no credentials that can change
+anything.
+
+Co-locating them is not incidental: a full agent turn, including a serializable
+transaction, returns in about a second because the function and the cluster are
+in the same region.
+
 **Where each part runs, and why.** The agent turn runs on **AWS Lambda** behind
 a Function URL — that is the agentic work, and it is deployed on AWS. Vercel
 serves the static page and the read-only replay API, because replay is pure SQL
