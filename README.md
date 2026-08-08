@@ -667,55 +667,66 @@ Three things this check caught that `GRANT` alone did not fix:
   user cannot replay history from before it was created** — so create the reader
   before recording anything you intend to replay.
 
-### 4d. Analyst access over MCP, read-only
+### 4d. Analyst access over the Cloud managed MCP server
 
-`.mcp.json` is the **CockroachDB Cloud managed MCP server** configuration,
-generated from the Cloud Console. Clone this repo and any MCP-compatible client
-picks it up automatically — no setup command needed:
+`.mcp.json` is the configuration the CockroachDB Cloud Console generates. Clone
+the repo, authenticate once, and any MCP client — Claude Code, Cursor, VS Code —
+can interrogate the memory layer in natural language.
+
+Asked *"show me every decision on ORD-4502 and what each concluded"*, the server
+returned:
 
 ```json
-{
-  "mcpServers": {
-    "cockroachdb-cloud": {
-      "type": "http",
-      "url": "https://cockroachlabs.cloud/mcp",
-      "headers": { "mcp-cluster-id": "<cluster-uuid>" }
-    }
-  }
-}
+[
+  {"agent_id": "agent-email",    "decision_kind": "refund_full",
+   "amount_minor": 3498, "attempt": 1, "abort_sqlstate": null,
+   "display_name": "Jess Ellis", "item": "Set of four stoneware mugs"},
+  {"agent_id": "agent-whatsapp", "decision_kind": "decline_already_refunded",
+   "amount_minor": 0,    "attempt": 2, "abort_sqlstate": "40001",
+   "display_name": "Jess Ellis", "item": "Set of four stoneware mugs"}
+]
 ```
 
-Then authenticate once (`/mcp` in Claude Code, or the equivalent in Cursor or
-VS Code) and start asking questions.
+and *"how many decisions were forced to retry by a serialization conflict?"*:
 
-No secret lives in that file — `mcp-cluster-id` is the cluster's UUID, not a
-credential. Authentication is separate: OAuth for interactive use, or a service
-account for unattended pipelines. This project uses **`recall-mcp-reader`**,
-described in the Cloud Console as *"Read-only MCP analyst access to Recall agent
-memory. No write privileges."*
+```json
+[{"forced_to_retry": 1}]
+```
+
+That is the race, read back through CockroachDB's own tooling by someone who
+wrote no SQL — the retry, the SQLSTATE, and the fact that the second agent
+declined rather than paid again.
+
+**No secret in the config.** `mcp-cluster-id` is the cluster's UUID, not a
+credential; authentication is separate — OAuth interactively, or the
+`recall-mcp-reader` service account for unattended use, whose Console
+description is *"Read-only MCP analyst access to Recall agent memory. No write
+privileges."*
 
 **Two independent layers, neither relying on the other.** The service account
-bounds what the MCP server can reach at the CockroachDB Cloud level. The
-`recall_reader` SQL user bounds what any connection can do inside the database.
-An analyst tool that could write might alter the history it exists to report on
-— and pointing an LLM at that tool sharpens the problem rather than softening
-it. Verified at the SQL layer, connected as the reader:
+bounds what the MCP server can reach at the CockroachDB Cloud level; the
+`recall_reader` SQL user bounds what any connection can do inside the database,
+where every write is refused with `42501`. An analyst tool that could write
+might alter the history it exists to report on — and pointing an LLM at that
+tool sharpens the problem rather than softening it.
+
+#### Feedback on the tool: MCP cannot do point-in-time reads
+
+Worth reporting, since the managed server is one of the tools this entry is
+built on. It pins its own read timestamp, so a user-supplied `AS OF SYSTEM TIME`
+is rejected:
 
 ```
-connected as: recall_reader
-
-decisions by kind:
-  refund_partial               3
-  refund_full                  1
-  decline_already_refunded     1
-decisions forced to retry by a serialization conflict: 2
-ORD-4502 refunded: then=0 now=3498   <- time travel works for the analyst
+inconsistent AS OF SYSTEM TIME timestamp;
+expected: 1786186664.072974567,0, got: 1786094389.108813397,0
 ```
 
-The read-only credential matters more here than anywhere else. An analyst tool
-that could write might alter the history it is meant to be reporting on, and
-pointing an LLM at that tool sharpens the problem rather than softening it. The
-same `42501` boundary shown in 4c applies.
+Sensible as a default — it keeps analyst queries consistent and cheap. But it
+means the headline capability of this project, reconstructing what an agent knew
+at a past instant, is **not** reachable through MCP; `replay.py` uses a direct
+SQL connection for that. An opt-in that let a caller supply its own timestamp
+would make the managed server a complete analyst surface for exactly the
+auditing use case CockroachDB's time-travel reads are best at.
 
 ### 5. Node kill — survivability
 
