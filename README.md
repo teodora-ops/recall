@@ -169,7 +169,7 @@ shows, is not even *supported* at a weaker isolation level.
 | `create_reader.py` | The read-only SQL user, and proof it cannot write |
 | `aws/handler.py` | The agent turn as it runs on Lambda |
 | `aws/deploy_lambda.py` | Builds a Linux-wheel deployment zip and ships it |
-| `mcp.json` | MCP server config for analyst access, through the read-only user |
+| `.mcp.json` | CockroachDB Cloud managed MCP server — analyst access, read-only |
 | `apply_schema.py` | Idempotent schema applier; prints what landed |
 | `retention.py` | Holds every replay-path table at the required MVCC window |
 | `persona.py` | The fictional business the corpus describes — the human-editable part |
@@ -669,13 +669,24 @@ Three things this check caught that `GRANT` alone did not fix:
 
 ### 4d. Analyst access over MCP, read-only
 
-`mcp.json` is the **CockroachDB Cloud managed MCP server** configuration,
-generated from the Cloud Console. Any MCP-compatible client connects with it:
+`.mcp.json` is the **CockroachDB Cloud managed MCP server** configuration,
+generated from the Cloud Console. Clone this repo and any MCP-compatible client
+picks it up automatically — no setup command needed:
 
-```bash
-claude mcp add cockroachdb-cloud https://cockroachlabs.cloud/mcp   --transport http --header "mcp-cluster-id: <cluster-uuid>"
-claude /mcp     # then Authenticate
+```json
+{
+  "mcpServers": {
+    "cockroachdb-cloud": {
+      "type": "http",
+      "url": "https://cockroachlabs.cloud/mcp",
+      "headers": { "mcp-cluster-id": "<cluster-uuid>" }
+    }
+  }
+}
 ```
+
+Then authenticate once (`/mcp` in Claude Code, or the equivalent in Cursor or
+VS Code) and start asking questions.
 
 No secret lives in that file — `mcp-cluster-id` is the cluster's UUID, not a
 credential. Authentication is separate: OAuth for interactive use, or a service
