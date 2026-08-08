@@ -81,9 +81,9 @@ database. They get protected ahead of everything else.
 
 ```
    email ─┐
-whatsapp ─┼─→  agent (Python)  ─────→  Bedrock Nova Pro      (reasoning)
- webchat ─┘          │                 Bedrock Titan v2      (embeddings, 1024d)
-                     │                 S3                    (case artifacts)
+whatsapp ─┼─→  agent  ───────────────→  Bedrock Nova Pro     (reasoning)
+ webchat ─┘    (AWS Lambda)             Bedrock Titan v2     (embeddings, 1024d)
+                     │                  S3                   (case artifacts)
                      ↓
               CockroachDB Cloud  ── cases + C-SPANN vector index
               (eu-west-2, v26.2.1)   customers, orders,
@@ -100,19 +100,47 @@ whatsapp ─┼─→  agent (Python)  ─────→  Bedrock Nova Pro     
 | Reasoning | Amazon Bedrock, Nova Pro, via the Converse API |
 | Embeddings | Amazon Bedrock, Titan Text Embeddings v2, 1024 dims |
 | Artifacts | S3 — case bodies; vectors and pointers stay in CockroachDB |
-| Agent execution | Python, run from CLI and from the deployed app |
-| Deployed demo | Vercel serverless functions + static frontend |
-| Analyst access | CockroachDB managed MCP server, read-only |
+| Agent execution | **AWS Lambda** (Function URL) — and the same code from the CLI |
+| Deployed demo | Vercel — static frontend and the read-only replay API |
+| Analyst access | CockroachDB Cloud **managed MCP server**, read-only |
 
-Agent execution is plain Python rather than Lambda. The IAM machine user this
-project runs under is scoped to Bedrock and S3 only, and on a two-week clock
-the deployed replay UI is a hard contest requirement while Lambda is not — so
-the deployment budget went to the thing that has to exist. Nothing in the
-design depends on where the process runs.
+**Where each part runs, and why.** The agent turn runs on **AWS Lambda** behind
+a Function URL — that is the agentic work, and it is deployed on AWS. Vercel
+serves the static page and the read-only replay API, because replay is pure SQL
+against CockroachDB and needs no AWS credentials at all (see below), so putting
+it on Lambda would buy nothing.
+
+There is no Lambda-specific fork of the decision logic. `aws/handler.py` imports
+`sandbox.py`, which imports `agent.py` — the same module `race.py` and the CLI
+drive. What runs in production is what the evidence below was produced with.
 
 The Converse API is used specifically so the reasoning model is swappable by
 config rather than by rewrite. No model ID is hardcoded anywhere; both are read
 from `.env`.
+
+### Which CockroachDB and AWS tools are used, and how
+
+**CockroachDB**
+
+| Tool | How it is used |
+|---|---|
+| **Distributed vector indexing** | The corpus is a `VECTOR(1024)` column with a C-SPANN index. `explain_check.py` proves the planner *uses* it at real row counts — and that filtered variants fall off it, which is handled in Python rather than with a prefix column ([Evidence 1](#1-the-distributed-vector-index-accepts-vector1024--and-is-actually-used)) |
+| **Cloud managed MCP server** | Analyst access to the memory store in natural language, through the read-only SQL user, including historical questions via `AS OF SYSTEM TIME` ([Evidence 4d](#4d-analyst-access-over-mcp-read-only)) |
+
+Beyond the tool list, the entry leans on three CockroachDB capabilities that have
+no equivalent in the Postgres + pgvector stack it would otherwise be:
+`SERIALIZABLE` isolation, `AS OF SYSTEM TIME`, and `cluster_logical_timestamp()`
+— which, as [Evidence 4b](#4b-the-control--the-same-code-one-isolation-level-down)
+shows, is not even *supported* at a weaker isolation level.
+
+**AWS**
+
+| Service | How it is used |
+|---|---|
+| **Lambda** | Runs the agent turn behind a Function URL — recall, the policy gate, and the decision plus its action committed in one serializable transaction |
+| **Bedrock — Titan Text Embeddings v2** | Embeds every case into the 1024-dim vector column, with a mandatory on-disk cache |
+| **Bedrock — Nova Pro** | Proposes a resolution from the recalled cases, via the Converse API. It proposes and writes the rationale; it does not authorise — a pure policy gate does |
+| **S3** | Stores case bodies. Vectors and pointers stay in CockroachDB; the artifacts do not |
 
 ### Repository layout
 
@@ -128,6 +156,8 @@ from `.env`.
 | `replay.py` | Reconstruct what an agent knew, and diff it against now |
 | `sandbox.py` | The live "run a new case" path, with no model call |
 | `create_reader.py` | The read-only SQL user, and proof it cannot write |
+| `aws/handler.py` | The agent turn as it runs on Lambda |
+| `aws/deploy_lambda.py` | Builds a Linux-wheel deployment zip and ships it |
 | `mcp.json` | MCP server config for analyst access, through the read-only user |
 | `apply_schema.py` | Idempotent schema applier; prints what landed |
 | `retention.py` | Holds every replay-path table at the required MVCC window |
