@@ -47,7 +47,23 @@ MODULES = ["db.py", "embeddings.py", "recall.py", "txn.py", "agent.py",
            "sandbox.py", "persona.py"]
 
 # boto3 is already in the Lambda runtime, so it is not packaged.
-DEPS = ["psycopg[binary]==3.3.4"]
+#
+# typing_extensions is listed EXPLICITLY, and that is not belt-and-braces.
+# psycopg declares it conditionally:
+#
+#     typing-extensions>=4.6; python_version < "3.13"
+#     tzdata;                 sys_platform == "win32"
+#
+# --platform and --python-version decide which *wheels* are compatible; they do
+# not fully re-evaluate environment markers, so pip resolves those against the
+# BUILD machine. Building on Windows/3.14 therefore skipped typing_extensions
+# (3.14 >= 3.13) and packaged tzdata (win32) — precisely inverted for a
+# Linux/3.12 target. The function imported cleanly and then died at runtime
+# with ModuleNotFoundError: No module named 'typing_extensions'.
+DEPS = [
+    "psycopg[binary]==3.3.4",
+    "typing_extensions>=4.6",
+]
 
 
 def build() -> Path:
@@ -126,15 +142,23 @@ def deploy() -> None:
     print(f"uploaded   : version {r['Version']}, {r['CodeSize']} bytes")
 
     # The handler lives at handler.lambda_handler and needs long enough for a
-    # cold start plus a serializable transaction.
-    try:
-        lam.update_function_configuration(
-            FunctionName=FUNCTION, Handler="handler.lambda_handler",
-            Timeout=30, MemorySize=512)
-        print("config     : handler.lambda_handler, 30s, 512 MB")
-    except ClientError as e:
-        print(f"config     : not updated ({e.response['Error']['Code']}) — "
-              f"set Handler to handler.lambda_handler in the console")
+    # cold start plus a serializable transaction. Retried, because Lambda
+    # rejects a config change while the code upload is still settling
+    # (ResourceConflictException) — which it always is, immediately after one.
+    import time
+    for attempt in range(1, 7):
+        try:
+            lam.update_function_configuration(
+                FunctionName=FUNCTION, Handler="handler.lambda_handler",
+                Timeout=30, MemorySize=512)
+            print("config     : handler.lambda_handler, 30s, 512 MB")
+            break
+        except ClientError as e:
+            if attempt == 6:
+                print(f"config     : NOT updated ({e.response['Error']['Code']}) "
+                      f"— set it in the console")
+                break
+            time.sleep(6)
 
     print("\nRemaining, in the console: set COCKROACH_URL on the function's "
           "environment variables (a credential that can write).")

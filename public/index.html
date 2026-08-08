@@ -83,10 +83,11 @@
   <div id="flip"></div>
 
   <h2>Run one now</h2>
-  <p class="sub">Nothing above is a recording. This mints a throwaway order,
-  runs an agent turn in a real serializable transaction, and the resulting
-  decision is replayable immediately — it appears at the top of the timeline.
-  It never touches the order above.</p>
+  <p class="sub">Nothing above is a recording. This calls the agent running on
+  <strong>AWS Lambda</strong>, which mints a throwaway order and decides it in a
+  real serializable transaction against CockroachDB. The resulting decision is
+  replayable immediately — it appears at the top of the timeline. It never
+  touches the order above.</p>
   <div class="card">
     <button id="run">Run a new case</button>
     <span class="meta" id="run-note" style="margin-left:.75rem"></span>
@@ -112,6 +113,9 @@
 </main>
 
 <script>
+// The deployed agent. Set to the Lambda Function URL so the button exercises
+// the AWS path; falls back to the Vercel function if unset.
+window.LAMBDA_URL = 'https://qqkg6zyuegqlqlc4rajizwco3y0dzlzh.lambda-url.eu-west-2.on.aws/';
 const $ = s => document.querySelector(s);
 const money = p => '£' + ((p||0)/100).toFixed(2);
 const esc = s => (s===null||s===undefined) ? '' :
@@ -202,7 +206,10 @@ document.getElementById('run').addEventListener('click', async (ev) => {
   $('#run-note').textContent = 'running a serializable transaction…';
   $('#run-out').innerHTML = '';
   try {
-    const r = await (await fetch('/api/run', {method:'POST'})).json();
+    // Calls AWS Lambda directly when a Function URL is configured, so the
+    // agent turn a judge triggers genuinely runs on AWS rather than on Vercel.
+    const endpoint = window.LAMBDA_URL || '/api/run';
+    const r = await (await fetch(endpoint, {method:'POST'})).json();
     if (!r.ok) { $('#run-note').textContent = ''; 
       $('#run-out').innerHTML = `<div class="card" style="margin-top:.8rem">${esc(r.error)}</div>`;
       btn.disabled = false; return; }
@@ -213,6 +220,9 @@ document.getElementById('run').addEventListener('click', async (ev) => {
         &nbsp;${money(r.decision_amount_minor)}</div>
       <div>${esc(r.rationale)}</div>
       <div class="meta" style="margin-top:.5rem">recalled ${r.recalled} case(s) ·
+        ${r.runtime === 'aws-lambda'
+          ? 'ran on AWS Lambda in ' + esc(r.region)
+          : 'ran on the Vercel function'} ·
         rationale is pre-written, no model call — the transaction, the policy
         gate and the replay anchor are real</div>
       <div style="margin-top:.6rem"><a href="#" data-replay="${esc(r.decision_id)}">replay this decision →</a></div>
