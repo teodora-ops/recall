@@ -136,7 +136,7 @@ from `.env`.
 | Tool | How it is used |
 |---|---|
 | **Distributed vector indexing** | The corpus is a `VECTOR(1024)` column with a C-SPANN index. `explain_check.py` proves the planner *uses* it at real row counts — and that filtered variants fall off it, which is handled in Python rather than with a prefix column ([Evidence 1](#1-the-distributed-vector-index-accepts-vector1024--and-is-actually-used)) |
-| **Cloud managed MCP server** | Analyst access to the memory store in natural language, through the read-only SQL user, including historical questions via `AS OF SYSTEM TIME` ([Evidence 4d](#4d-analyst-access-over-mcp-read-only)) |
+| **Cloud managed MCP server** | `mcp.json` connects any MCP client — Claude Code, Cursor, VS Code — to the cluster at `https://cockroachlabs.cloud/mcp`. An analyst asks questions of the corpus, the decisions and the actions in natural language, including historical ones, because `AS OF SYSTEM TIME` works through it. Read-only by default, audit-logged, authenticated by a service account whose only role is exactly that ([Evidence 4d](#4d-analyst-access-over-mcp-read-only)) |
 
 Beyond the tool list, the entry leans on three CockroachDB capabilities that have
 no equivalent in the Postgres + pgvector stack it would otherwise be:
@@ -669,10 +669,26 @@ Three things this check caught that `GRANT` alone did not fix:
 
 ### 4d. Analyst access over MCP, read-only
 
-`mcp.json` points an MCP client at the memory store through `recall_reader`.
-An analyst can then ask questions of the corpus, the decisions and the actions
-in natural language — including historical ones, because `AS OF SYSTEM TIME`
-works for that user too. Verified connected as the reader:
+`mcp.json` is the **CockroachDB Cloud managed MCP server** configuration,
+generated from the Cloud Console. Any MCP-compatible client connects with it:
+
+```bash
+claude mcp add cockroachdb-cloud https://cockroachlabs.cloud/mcp   --transport http --header "mcp-cluster-id: <cluster-uuid>"
+claude /mcp     # then Authenticate
+```
+
+No secret lives in that file — `mcp-cluster-id` is the cluster's UUID, not a
+credential. Authentication is separate: OAuth for interactive use, or a service
+account for unattended pipelines. This project uses **`recall-mcp-reader`**,
+described in the Cloud Console as *"Read-only MCP analyst access to Recall agent
+memory. No write privileges."*
+
+**Two independent layers, neither relying on the other.** The service account
+bounds what the MCP server can reach at the CockroachDB Cloud level. The
+`recall_reader` SQL user bounds what any connection can do inside the database.
+An analyst tool that could write might alter the history it exists to report on
+— and pointing an LLM at that tool sharpens the problem rather than softening
+it. Verified at the SQL layer, connected as the reader:
 
 ```
 connected as: recall_reader

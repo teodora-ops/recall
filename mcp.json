@@ -1,27 +1,46 @@
 {
   "$comment": [
-    "MCP server configuration for analyst access to Recall's memory.",
+    "CockroachDB Cloud Managed MCP Server — analyst access to Recall's memory.",
     "",
-    "Point an MCP client (Claude Desktop, Claude Code, or any other) at this",
-    "and it can query the corpus, the decisions and the actions — including",
-    "AS OF SYSTEM TIME, so an analyst can ask what an agent knew at the time",
-    "rather than only what is true now.",
+    "Generated from the CockroachDB Cloud Console (cluster > Connect > Model",
+    "Context Protocol). Point any MCP-compatible client at it — Claude Code,",
+    "Cursor, VS Code — and an analyst can ask questions of the corpus, the",
+    "decisions and the actions in natural language, including historical ones,",
+    "because AS OF SYSTEM TIME works through it.",
     "",
-    "It connects as recall_reader, NOT recall_admin. That is the point: an",
-    "analyst tool with write access could alter the history it is meant to be",
-    "reporting on, and an LLM driving that tool makes the distinction sharper",
-    "rather than softer. create_reader.py --verify proves the boundary: every",
-    "write refused with SQLSTATE 42501.",
+    "There is no secret in this file. mcp-cluster-id is the cluster's UUID, not",
+    "a credential; authentication happens separately, either through the OAuth",
+    "flow (interactive) or a service-account API key (autonomous).",
     "",
-    "Set COCKROACH_READER_URL in your environment first — the same value the",
-    "deployed app uses. It is never committed."
+    "SETUP",
+    "  claude mcp add cockroachdb-cloud https://cockroachlabs.cloud/mcp \\",
+    "    --transport http \\",
+    "    --header \"mcp-cluster-id: f0e1c1fc-ab2f-40c8-b25f-00c70d5c54a0\"",
+    "  claude /mcp        then choose cockroachdb-cloud > Authenticate",
+    "",
+    "ACCESS",
+    "  Read-only by default — the managed server does not write unless write",
+    "  access is explicitly granted, and every call is audit-logged in the Cloud",
+    "  Console.",
+    "",
+    "  For unattended use, authenticate with a service account rather than",
+    "  OAuth. This project uses `recall-mcp-reader`, whose description is",
+    "  literally 'Read-only MCP analyst access to Recall agent memory. No write",
+    "  privileges.' Supply its API key as a Bearer token; keep it out of the",
+    "  repo.",
+    "",
+    "  That gives two independent layers. The service account bounds what the",
+    "  MCP server can reach at the CockroachDB Cloud level; the recall_reader",
+    "  SQL user bounds what any connection can do inside the database, where",
+    "  every write is refused with SQLSTATE 42501 (see create_reader.py",
+    "  --verify). Neither depends on the other being configured correctly."
   ],
   "mcpServers": {
-    "recall-memory": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-postgres"],
-      "env": {
-        "POSTGRES_CONNECTION_STRING": "${COCKROACH_READER_URL}"
+    "cockroachdb-cloud": {
+      "type": "http",
+      "url": "https://cockroachlabs.cloud/mcp",
+      "headers": {
+        "mcp-cluster-id": "f0e1c1fc-ab2f-40c8-b25f-00c70d5c54a0"
       }
     }
   }
