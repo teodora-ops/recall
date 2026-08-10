@@ -79,7 +79,12 @@
   on <strong>email</strong> and on <strong>WhatsApp</strong>. Two agents picked it
   up. Both read the order, both saw no refund yet. Here is what each did — and
   what each knew when it decided.</p>
-  <div class="grid" id="hero"></div>
+  <!-- Overwritten as soon as the two replays resolve. Without a placeholder the
+       headline feature is an unexplained blank gap for the seconds the
+       reconstruction takes — several more on a cold start. -->
+  <div class="grid" id="hero">
+    <div class="card empty" style="grid-column:1/-1">reconstructing both decisions as they stood…</div>
+  </div>
   <div id="flip"></div>
 
   <h2>Run one now</h2>
@@ -169,30 +174,45 @@ async function get(u){ const r = await fetch(u); return r.json(); }
   const raced = Object.values(byOrder)
     .filter(ds => ds.length >= 2 && ds.some(d => d.abort_sqlstate))
     .sort((a,b) => b.length - a.length)[0];
+  // Every path out of here must replace the placeholder. A stuck
+  // "reconstructing…" claims work is still happening when it has already failed,
+  // which is worse than the blank gap it replaced.
   if (raced) {
-    const pair = raced.slice(0,2).reverse();
-    const full = await Promise.all(
-      pair.map(d => get('/api/replay?id=' + d.decision_id.slice(0,8))));
-    const usable = full.filter(f => f.ok);
-    $('#hero').innerHTML = usable.length
-      ? usable.map(renderSide).join('')
-      : `<div class="card"><strong>The recorded race is outside the replay
-         window.</strong><div class="meta" style="margin-top:.5rem">Its snapshot
-         is older than the cluster's descriptor retention. Click <em>Run a new
-         case</em> below, then open it in the timeline — replay works on any
-         decision inside the window.</div></div>`;
-    const flipped = full.find(f => f.counterfactual && f.counterfactual.flipped);
-    if (flipped) {
-      const cf = flipped.counterfactual;
-      $('#flip').innerHTML = `<div class="flip">
-        <strong>The same intent, judged against today's memory, flips.</strong><br>
-        The agent proposed <code>${esc(cf.proposed)}</code>. Against the world it
-        saw, that was authorised as <code>${esc(cf.then)}</code>; against the world
-        today it would be <code>${esc(cf.now)}</code>.
-        <div class="meta" style="margin-top:.4rem">Authorisation is a pure function,
-        so this is recomputed exactly rather than estimated.</div>
-      </div>`;
+    try {
+      const pair = raced.slice(0,2).reverse();
+      const full = await Promise.all(
+        pair.map(d => get('/api/replay?id=' + d.decision_id.slice(0,8))));
+      const usable = full.filter(f => f.ok);
+      $('#hero').innerHTML = usable.length
+        ? usable.map(renderSide).join('')
+        : `<div class="card" style="grid-column:1/-1"><strong>The recorded race is
+           outside the replay window.</strong><div class="meta" style="margin-top:.5rem">Its
+           snapshot is older than the cluster's descriptor retention. Click <em>Run a
+           new case</em> below, then open it in the timeline — replay works on any
+           decision inside the window.</div></div>`;
+      const flipped = full.find(f => f.counterfactual && f.counterfactual.flipped);
+      if (flipped) {
+        const cf = flipped.counterfactual;
+        $('#flip').innerHTML = `<div class="flip">
+          <strong>The same intent, judged against today's memory, flips.</strong><br>
+          The agent proposed <code>${esc(cf.proposed)}</code>. Against the world it
+          saw, that was authorised as <code>${esc(cf.then)}</code>; against the world
+          today it would be <code>${esc(cf.now)}</code>.
+          <div class="meta" style="margin-top:.4rem">Authorisation is a pure function,
+          so this is recomputed exactly rather than estimated.</div>
+        </div>`;
+      }
+    } catch (e) {
+      $('#hero').innerHTML = `<div class="card" style="grid-column:1/-1"><strong>Could
+        not reconstruct the race.</strong><div class="meta" style="margin-top:.5rem">The
+        replay endpoint did not answer. The decisions themselves are in the timeline
+        below.</div></div>`;
     }
+  } else {
+    $('#hero').innerHTML = `<div class="card" style="grid-column:1/-1"><strong>No
+      contended order in the recent timeline.</strong><div class="meta" style="margin-top:.5rem">The
+      hero needs one order with two decisions, one of which was forced to retry.
+      Click <em>Run a new case</em> below, then open it in the timeline.</div></div>`;
   }
 })();
 
