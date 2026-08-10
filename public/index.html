@@ -122,6 +122,9 @@ const esc = s => (s===null||s===undefined) ? '' :
   s.toString().replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const kindClass = k => (k||'').startsWith('refund') ? 'refund' : 'decline';
 const when = s => esc((s||'').slice(0,16).replace('T',' '));
+// The hero cards are the one place the gap between the two decisions is the
+// point, and the race resolves inside a minute — so show seconds there.
+const whenSec = s => esc((s||'').slice(0,19).replace('T',' '));
 async function get(u){ const r = await fetch(u); return r.json(); }
 
 (async function init(){
@@ -132,7 +135,11 @@ async function get(u){ const r = await fetch(u); return r.json(); }
       `<span class="pill">${esc(h.cluster||'')}</span>`,
       `<span class="pill">${h.cases} cases</span>`,
       `<span class="pill">${h.decisions} decisions</span>`,
-      `<span class="pill ${h.replay_ok?'ok':'bad'}">replay window ${h.retention_days}d</span>`,
+      // Label it as what it measures: the zone config on our tables. The
+      // practical replay window is shorter — descriptor ranges keep the cluster
+      // default and a Basic tenant cannot raise system-range GC. Saying "replay
+      // window 90d" here would promise something the deployment can't honour.
+      `<span class="pill ${h.replay_ok?'ok':'bad'}" title="gc.ttlseconds on the replay tables. The usable AS OF SYSTEM TIME window is bounded by system-range GC, which a Basic tenant cannot configure.">MVCC retention ${h.retention_days}d</span>`,
       `<span class="pill ${h.read_only?'ok':''}">${h.read_only?'read-only user':'admin user'}</span>`
     ].join('');
   } catch(e){ $('#status').innerHTML = '<span class="pill bad">unreachable</span>'; }
@@ -203,7 +210,7 @@ function renderSide(r){
       ${money(then.order.amount_minor)}, already refunded
       ${money(then.order.refunded_minor)}</div>` : '';
   return `<div class="card">
-    <div class="meta">${esc(d.agent_id)} · ${when(d.decided_at)}</div>
+    <div class="meta">${esc(d.agent_id)} · ${whenSec(d.decided_at)}</div>
     <div class="amount"><span class="kind ${kindClass(d.decision_kind)}">${esc(d.decision_kind)}</span>
       &nbsp;${money(d.amount_minor)}</div>
     <div>${esc(d.rationale)}</div>
