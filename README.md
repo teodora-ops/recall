@@ -502,27 +502,41 @@ text, so `txn.validate_hlc()` gates it with a strict pattern plus a `Decimal`
 round-trip the value must survive unchanged. `now()`, `1e9`, `-1` and
 `'...' OR '1'='1` are all rejected before any string reaches SQL.
 
-**The retention window is load-bearing and easy to get wrong.** This cluster's
-default range is `gc.ttlseconds = 4500` — 75 minutes. `AS OF SYSTEM TIME`
-cannot read older than that window, so a replay of yesterday's decision would
-simply fail. `ALTER RANGE default` is refused to non-root users on Cloud Basic,
-but per-table zone configs are permitted, which is sufficient:
+**The retention window is load-bearing — and on CockroachDB Cloud Basic it is
+not the one you configure.**
+
+Every replay table here holds `gc.ttlseconds = 7776000` (90 days), verified by
+`retention.py`. That is necessary and it is not sufficient. `AS OF SYSTEM TIME`
+also has to resolve schema and role identity at the historical timestamp, which
+reads CockroachDB's own descriptor ranges — and those keep the cluster default,
+4500s. A tenant cannot raise them:
 
 ```
-target: gc.ttlseconds = 7776000 (90 days)
---------------------------------------------------------------------
-[ OK ]  replay cases                  90.0d
---------------------------------------------------------------------
-All replay tables hold the required window.
+ALTER RANGE system CONFIGURE ZONE USING gc.ttlseconds = 7776000
+  -> non-system tenants cannot configure zone for system range
+ALTER RANGE meta   CONFIGURE ZONE USING gc.ttlseconds = 7776000
+  -> non-system tenants cannot configure zone for meta range
 ```
 
-90 days is sized off the **judging window (19 Aug – 15 Sep 2026)**, not the
-build schedule: a judge opening the replay UI on the final day must still
-reconstruct a decision seeded in mid-August. Every table the replay path reads
-needs its own config — new tables inherit the 75-minute default, and that
-failure only surfaces once history is old enough to have been collected, which
-is to say during judging rather than during the build. `retention.py` exists to
-catch exactly that and exits non-zero if any replay table is below target.
+Past that window, replay fails on the descriptors rather than on the data:
+
+```
+role recall_admin was concurrently dropped: error in retrieving descs ...
+batch timestamp ... must be after replica GC threshold ... (/Tenant/29891/Table/7)
+```
+
+**So the practical replay window on Basic is roughly 75 minutes, not 90 days.**
+The mechanism is exactly as described above and works perfectly inside it; the
+limit is the deployment tier, not the design. `replay.py` raises
+`OutsideReplayWindow` and the UI says so plainly rather than showing an empty
+panel.
+
+This was found by replaying a decision from the previous day, which is the only
+way to find it — a freshly written decision always replays. Worth stating for
+anyone building on Basic, and it is the single most useful piece of feedback in
+this submission: **a tenant-visible knob for descriptor retention would make
+time-travel auditing viable on Basic.** On Standard or Advanced, where system
+ranges are configurable, the 90 days on the data tables would hold.
 
 ### 4. Serializable race — two agents, one refund
 

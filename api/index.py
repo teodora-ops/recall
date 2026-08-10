@@ -108,7 +108,13 @@ def route_replay(qs: dict) -> tuple[int, dict]:
     if len(matches) != 1:
         return 404, {"ok": False,
                      "error": f"{len(matches)} decisions match {wanted!r}"}
-    return 200, {"ok": True, **replay.diff(str(matches[0][0]))}
+    try:
+        return 200, {"ok": True, **replay.diff(str(matches[0][0]))}
+    except replay.OutsideReplayWindow as e:
+        # Not a failure of the code — the history genuinely no longer exists.
+        # Say so precisely rather than surfacing a descriptor error.
+        return 200, {"ok": False, "outside_replay_window": True,
+                     "error": str(e)}
 
 
 def route_run() -> tuple[int, dict]:

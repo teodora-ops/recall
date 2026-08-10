@@ -166,7 +166,14 @@ async function get(u){ const r = await fetch(u); return r.json(); }
     const pair = raced.slice(0,2).reverse();
     const full = await Promise.all(
       pair.map(d => get('/api/replay?id=' + d.decision_id.slice(0,8))));
-    $('#hero').innerHTML = full.filter(f => f.ok).map(renderSide).join('');
+    const usable = full.filter(f => f.ok);
+    $('#hero').innerHTML = usable.length
+      ? usable.map(renderSide).join('')
+      : `<div class="card"><strong>The recorded race is outside the replay
+         window.</strong><div class="meta" style="margin-top:.5rem">Its snapshot
+         is older than the cluster's descriptor retention. Click <em>Run a new
+         case</em> below, then open it in the timeline — replay works on any
+         decision inside the window.</div></div>`;
     const flipped = full.find(f => f.counterfactual && f.counterfactual.flipped);
     if (flipped) {
       const cf = flipped.counterfactual;
@@ -249,7 +256,18 @@ async function showDetail(id){
   $('#detail-h').style.display = '';
   $('#detail').innerHTML = '<div class="card empty">reconstructing…</div>';
   const r = await get('/api/replay?id=' + id.slice(0,8));
-  if (!r.ok) { $('#detail').innerHTML = `<div class="card">${esc(r.error)}</div>`; return; }
+  if (!r.ok) {
+    $('#detail').innerHTML = r.outside_replay_window
+      ? `<div class="card"><strong>Outside the replay window.</strong>
+         <div class="meta" style="margin-top:.5rem">This decision's snapshot is
+         older than the cluster still retains. The data tables here hold 90 days,
+         but CockroachDB's internal descriptor ranges keep the cluster default,
+         and a Cloud Basic tenant cannot raise them — <code>non-system tenants
+         cannot configure zone for system range</code>. Run a new case above and
+         replay that one.</div></div>`
+      : `<div class="card">${esc(r.error)}</div>`;
+    $('#detail-h').style.display = ''; return;
+  }
   const d = r.decision, df = r.diff || {}, rc = df.recall_changes || {};
   const ch = [];
   (df.order_changes||[]).forEach(c => { const m = c.field.includes('minor');

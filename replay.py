@@ -36,6 +36,27 @@ import sys
 import db
 import txn
 
+
+class OutsideReplayWindow(Exception):
+    """The snapshot is older than what the cluster still retains.
+
+    Not our tables — those hold 90 days. CockroachDB's own descriptor ranges
+    keep the cluster default (4500s on this deployment), and AS OF SYSTEM TIME
+    needs them to resolve schema and role identity at the historical
+    timestamp. On CockroachDB Cloud Basic a tenant cannot raise system-range
+    GC: "non-system tenants cannot configure zone for system range".
+
+    So the practical replay window here is the system-range GC window, not the
+    one configured on the data. Surfaced as a distinct exception so callers can
+    say that plainly instead of leaking a descriptor error.
+    """
+
+
+def _is_gc_threshold(e: Exception) -> bool:
+    m = str(e)
+    return ("GC threshold" in m or "concurrently dropped" in m
+            or "must be after replica" in m)
+
 # Kinds the policy gate can return. Imported lazily in counterfactual() so
 # that importing replay.py never pulls in boto3.
 GATE_MODULE = "agent"
@@ -166,12 +187,25 @@ def reconstruct(decision_id: str, conn=None) -> dict:
         query_vec = cur.fetchone()[0]
 
         # THEN — one consistent snapshot across every table.
-        cur.execute(f"BEGIN AS OF SYSTEM TIME {snapshot}")
         try:
-            then = _world(cur, decision)
-            then["nearest"] = _nearest(cur, query_vec) if query_vec else []
-        finally:
-            cur.execute("COMMIT")
+            cur.execute(f"BEGIN AS OF SYSTEM TIME {snapshot}")
+            try:
+                then = _world(cur, decision)
+                then["nearest"] = _nearest(cur, query_vec) if query_vec else []
+            finally:
+                cur.execute("COMMIT")
+        except Exception as e:
+            try:
+                cur.execute("ROLLBACK")
+            except Exception:
+                pass
+            if _is_gc_threshold(e):
+                raise OutsideReplayWindow(
+                    f"decision {decision_id[:8]} is older than the cluster's "
+                    f"descriptor retention, so its snapshot can no longer be "
+                    f"reconstructed"
+                ) from e
+            raise
 
         # NOW — same code, present time.
         now = _world(cur, decision)
