@@ -152,10 +152,18 @@ async function get(u){ const r = await fetch(u); return r.json(); }
   tb.querySelectorAll('tr[data-id]').forEach(tr =>
     tr.addEventListener('click', () => showDetail(tr.dataset.id)));
 
-  const contended = rows.filter(d => d.order_id);
-  if (contended.length >= 2) {
-    const orderId = contended[0].order_id;
-    const pair = contended.filter(d => d.order_id === orderId).slice(0,2).reverse();
+  // The hero is the CONTENDED order — the one two agents raced over. Picking
+  // "the most recent order with decisions" showed a sandbox run instead, because
+  // every click of "run a new case" creates a newer order with exactly one
+  // decision. Choose the order that actually has a race on it: more than one
+  // decision, one of which was forced to retry.
+  const byOrder = {};
+  rows.filter(d => d.order_id).forEach(d => (byOrder[d.order_id] ||= []).push(d));
+  const raced = Object.values(byOrder)
+    .filter(ds => ds.length >= 2 && ds.some(d => d.abort_sqlstate))
+    .sort((a,b) => b.length - a.length)[0];
+  if (raced) {
+    const pair = raced.slice(0,2).reverse();
     const full = await Promise.all(
       pair.map(d => get('/api/replay?id=' + d.decision_id.slice(0,8))));
     $('#hero').innerHTML = full.filter(f => f.ok).map(renderSide).join('');
