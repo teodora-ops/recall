@@ -951,5 +951,5 @@ and the Operations panel.
 
 MIT — see [LICENSE](LICENSE).
 
-Built by Flux AI Consulting Ltd for the CockroachDB × AWS "Build with Agentic
-Memory" hackathon, 2026.
+Built by FLUXAI LTD (company no. 16724831, England and Wales) for the
+CockroachDB × AWS "Build with Agentic Memory" hackathon, 2026.
