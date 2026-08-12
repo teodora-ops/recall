@@ -23,9 +23,16 @@ thing given up, and the UI says so rather than implying a model ran.
 
 import random
 import secrets
+import threading
+from decimal import Decimal
 
 import agent
 import db
+
+# Barrier waits inside a Lambda invocation, not a developer's terminal. Long
+# enough that a slow round trip to London does not fake a deadlock, short
+# enough that a genuinely stuck worker fails inside the function timeout.
+BARRIER_TIMEOUT = 20
 
 SANDBOX_CUSTOMER = "SANDBOX-DEMO"
 
@@ -76,35 +83,46 @@ def borrow_query_vector(cur) -> tuple[str | None, list[str], list[float]]:
     return row[0], [str(x) for x in (row[1] or [])], list(row[2] or [])
 
 
+def rehydrate(cur, recalled_ids: list[str], dists: list[float]) -> list[dict]:
+    """Turn borrowed case ids back into the rows the decision records seeing."""
+    recalled: list[dict] = []
+    if not recalled_ids:
+        return recalled
+    cur.execute(
+        "SELECT case_id, channel, subject, resolution, outcome "
+        "FROM cases WHERE case_id = ANY(%s)", (recalled_ids,))
+    cols = [c.name for c in cur.description]
+    by_id = {str(r[0]): dict(zip(cols, r)) for r in cur.fetchall()}
+    for i, cid in enumerate(recalled_ids):
+        r = by_id.get(cid)
+        if r:
+            r["distance"] = dists[i] if i < len(dists) else 0.0
+            recalled.append(r)
+    return recalled
+
+
+def mint_order(cur, sc: dict) -> str:
+    """A throwaway order of its own, never the hero's."""
+    order_id = f"SANDBOX-{secrets.token_hex(4)}"
+    ensure_customer(cur)
+    cur.execute(
+        "INSERT INTO orders (order_id, customer_ref, item, amount_minor) "
+        "VALUES (%s,%s,%s,%s)",
+        (order_id, SANDBOX_CUSTOMER, sc["item"], sc["amount"]))
+    return order_id
+
+
 def run(scenario_index: int | None = None) -> dict:
     """Mint a sandbox order and decide it for real. Returns the decision."""
     rnd = random.Random(secrets.randbits(64))
     sc = SCENARIOS[scenario_index if scenario_index is not None
                    else rnd.randrange(len(SCENARIOS))]
-    order_id = f"SANDBOX-{secrets.token_hex(4)}"
 
     with db.connect() as conn:
         cur = conn.cursor()
-        ensure_customer(cur)
-        cur.execute(
-            "INSERT INTO orders (order_id, customer_ref, item, amount_minor) "
-            "VALUES (%s,%s,%s,%s)",
-            (order_id, SANDBOX_CUSTOMER, sc["item"], sc["amount"]))
+        order_id = mint_order(cur, sc)
         qvec, recalled_ids, dists = borrow_query_vector(cur)
-
-        # Rehydrate the recalled cases so the decision records what it "saw".
-        recalled: list[dict] = []
-        if recalled_ids:
-            cur.execute(
-                "SELECT case_id, channel, subject, resolution, outcome "
-                "FROM cases WHERE case_id = ANY(%s)", (recalled_ids,))
-            cols = [c.name for c in cur.description]
-            by_id = {str(r[0]): dict(zip(cols, r)) for r in cur.fetchall()}
-            for i, cid in enumerate(recalled_ids):
-                r = by_id.get(cid)
-                if r:
-                    r["distance"] = dists[i] if i < len(dists) else 0.0
-                    recalled.append(r)
+        recalled = rehydrate(cur, recalled_ids, dists)
 
     amount = (sc["amount"] if sc["kind"] == "refund_full"
               else int(sc["amount"] * sc.get("partial", 0.2)))
@@ -128,6 +146,116 @@ def run(scenario_index: int | None = None) -> dict:
         "attempts": out.attempts,
         "isolation": out.isolation,
         "recalled": len(r["recalled"]),
+        "model_called": False,
+    }
+
+
+def run_race() -> dict:
+    """Two agents, one throwaway order, raced for real.
+
+    This exists because the recorded race ages out. `AS OF SYSTEM TIME` can
+    only reach back as far as the cluster still retains, and on Cloud Basic the
+    binding constraint is the system descriptor ranges, which a tenant cannot
+    raise. Weeks into judging the seeded race is unreplayable and the hero —
+    the two-card contrast the whole argument rests on — has nothing to show.
+
+    `run()` cannot fill that gap: it produces one decision on one order, and
+    the hero needs an order carrying two decisions with a serialization
+    failure between them. So this races the same way race.py does, with the
+    same barrier forcing both agents to read before either writes.
+
+    What is real here is everything that matters: two connections, two
+    serializable transactions, a genuine 40001, and a loser that re-reads and
+    flips to a decline because `policy_gate` is pure and re-evaluated against
+    the freshly read order. What is pre-written is the rationale text, exactly
+    as in `run()`, so the endpoint needs no Bedrock credentials.
+    """
+    sc = SCENARIOS[0]  # the duplicate charge — the story the hero tells
+
+    with db.connect() as conn:
+        cur = conn.cursor()
+        order_id = mint_order(cur, sc)
+        qvec, recalled_ids, dists = borrow_query_vector(cur)
+        recalled = rehydrate(cur, recalled_ids, dists)
+
+    # Both agents propose the same full refund. Only the order state they each
+    # read inside the transaction decides what that proposal is authorised as.
+    proposal = agent.Proposal(kind="refund_full", amount_minor=sc["amount"],
+                              rationale=sc["rationale"],
+                              model="pre-written (no model call)")
+
+    both_read = threading.Barrier(2)
+    first_committed = threading.Event()
+    results: dict[str, object] = {}
+    errors: dict[str, str] = {}
+
+    def go(name: str, agent_id: str, goes_first: bool) -> None:
+        def hook(phase, attempt):
+            # Retries must run unimpeded — holding one at a barrier the other
+            # worker has already cleared would deadlock the invocation.
+            if attempt > 1:
+                return
+            if phase == "after_read":
+                both_read.wait(timeout=BARRIER_TIMEOUT)
+                if not goes_first:
+                    # Let the winner COMMIT before the loser writes, so there
+                    # is one conflict to explain rather than two.
+                    first_committed.wait(timeout=BARRIER_TIMEOUT)
+
+        try:
+            out = agent.handle(sc["message"], order_id, agent_id,
+                               proposal=proposal, query_vec=qvec,
+                               recalled=recalled, barrier=hook)
+            out.result["agent_id"] = agent_id
+            results[name] = out
+        except Exception as e:  # noqa: BLE001
+            errors[name] = f"{type(e).__name__}: {str(e).splitlines()[0][:200]}"
+            both_read.abort()  # release the peer rather than let it wait out
+        finally:
+            if goes_first:
+                first_committed.set()
+
+    # The channels are the story: the same customer chasing the same refund on
+    # two channels is what a shared memory layer has to survive.
+    ta = threading.Thread(target=go, args=("A", "agent-email", True))
+    tb = threading.Thread(target=go, args=("B", "agent-whatsapp", False))
+    ta.start(); tb.start()
+    ta.join(BARRIER_TIMEOUT * 3); tb.join(BARRIER_TIMEOUT * 3)
+
+    if errors:
+        raise RuntimeError("; ".join(f"{k}: {v}" for k, v in errors.items()))
+    if len(results) != 2:
+        raise RuntimeError("a racer did not finish inside the timeout")
+
+    with db.connect() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT refunded_minor FROM orders WHERE order_id = %s",
+                    (order_id,))
+        final = cur.fetchone()[0]
+        cur.execute("SELECT count(*), coalesce(sum(amount_minor),0) "
+                    "FROM actions WHERE order_id = %s", (order_id,))
+        n_actions, paid = cur.fetchone()
+
+    # Chronological, so the caller can render winner then loser without
+    # re-sorting: decision_hlc is assigned by the cluster, not by us.
+    ordered = sorted(results.values(),
+                     key=lambda o: Decimal(o.result["decision_hlc"]))
+
+    return {
+        "order_id": order_id,
+        "item": sc["item"],
+        "amount_minor": sc["amount"],
+        "decision_ids": [o.result["decision_id"] for o in ordered],
+        "kinds": [o.result["kind"] for o in ordered],
+        "attempts": [o.attempts for o in ordered],
+        "saw_serialization_failure": any(
+            getattr(o, "saw_serialization_failure", False)
+            for o in results.values()),
+        "actions_written": n_actions,
+        "paid_minor": paid,
+        "order_refunded_minor": final,
+        "paid_once": n_actions == 1 and paid == sc["amount"] == final,
+        "isolation": ordered[0].isolation,
         "model_called": False,
     }
 

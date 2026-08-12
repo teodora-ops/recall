@@ -77,9 +77,26 @@ def lambda_handler(event, context):
                                          f"{str(e).splitlines()[0][:300]}"},
                           started)
 
+    # mode=race runs two agents at one throwaway order instead of one agent at
+    # its own. The page asks for it when the seeded race has aged out of the
+    # replay window and the hero would otherwise have nothing to show.
+    mode = "single"
+    try:
+        raw = event.get("body") or ""
+        if event.get("isBase64Encoded") and raw:
+            import base64
+            raw = base64.b64decode(raw).decode("utf-8", "replace")
+        if raw.strip():
+            mode = (json.loads(raw).get("mode") or "single")
+    except Exception:  # noqa: BLE001
+        # A malformed body is not a reason to fail the request; the default
+        # mode is the safe one.
+        mode = "single"
+
     try:
         import sandbox
-        return _reply(200, {"ok": True, **sandbox.run()}, started)
+        work = sandbox.run_race if mode == "race" else sandbox.run
+        return _reply(200, {"ok": True, "mode": mode, **work()}, started)
     except Exception as e:  # noqa: BLE001
         return _reply(500, {"ok": False,
                             "error": f"{type(e).__name__}: "

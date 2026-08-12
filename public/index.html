@@ -108,6 +108,11 @@
   <h2 id="detail-h" style="display:none">Replay</h2>
   <div id="detail"></div>
 
+  <details id="ops-wrap" style="margin-top:2rem">
+    <summary style="cursor:pointer">Operations</summary>
+    <div id="ops" class="meta" style="margin-top:.7rem"></div>
+  </details>
+
   <footer>
     Reconstructed with <code>AS OF SYSTEM TIME</code> against CockroachDB.
     This page renders <code>replay.diff()</code> unchanged — the same function the
@@ -145,8 +150,12 @@ async function get(u){ const r = await fetch(u); return r.json(); }
       // default and a Basic tenant cannot raise system-range GC. Saying "replay
       // window 90d" here would promise something the deployment can't honour.
       `<span class="pill ${h.replay_ok?'ok':'bad'}" title="gc.ttlseconds on the replay tables. The usable AS OF SYSTEM TIME window is bounded by system-range GC, which a Basic tenant cannot configure.">MVCC retention ${h.retention_days}d</span>`,
+      // Not "an index exists" — whether the planner just chose it. An ignored
+      // index passes every naive check and fails the only one that matters.
+      `<span class="pill ${h.ops&&h.ops.vector_index_used?'ok':'bad'}">index in use</span>`,
       `<span class="pill ${h.read_only?'ok':''}">${h.read_only?'read-only user':'admin user'}</span>`
     ].join('');
+    renderOps(h);
   } catch(e){ $('#status').innerHTML = '<span class="pill bad">unreachable</span>'; }
 
   const list = await get('/api/replay');
@@ -171,50 +180,121 @@ async function get(u){ const r = await fetch(u); return r.json(); }
   // decision, one of which was forced to retry.
   const byOrder = {};
   rows.filter(d => d.order_id).forEach(d => (byOrder[d.order_id] ||= []).push(d));
-  const raced = Object.values(byOrder)
-    .filter(ds => ds.length >= 2 && ds.some(d => d.abort_sqlstate))
-    .sort((a,b) => b.length - a.length)[0];
+  const contended = Object.values(byOrder)
+    .filter(ds => ds.length >= 2 && ds.some(d => d.abort_sqlstate));
+  // Prefer the seeded story over any race the page itself ran. A rebuilt
+  // SANDBOX race is the fallback for when the seeded one has aged out — if it
+  // outranked the real one it would replace a named customer chasing a real
+  // duplicate charge with a throwaway order, which is a worse demo.
+  const raced = contended.find(ds => !String(ds[0].order_id).startsWith('SANDBOX-'))
+             || contended.sort((a,b) => b.length - a.length)[0];
   // Every path out of here must replace the placeholder. A stuck
-  // "reconstructing…" claims work is still happening when it has already failed,
-  // which is worse than the blank gap it replaced.
+  // "reconstructing…" claims work is still happening when it has already
+  // failed, which is worse than the blank gap it replaced.
+  let shown = false;
   if (raced) {
     try {
-      const pair = raced.slice(0,2).reverse();
-      const full = await Promise.all(
-        pair.map(d => get('/api/replay?id=' + d.decision_id.slice(0,8))));
-      const usable = full.filter(f => f.ok);
-      $('#hero').innerHTML = usable.length
-        ? usable.map(renderSide).join('')
-        : `<div class="card" style="grid-column:1/-1"><strong>The recorded race is
-           outside the replay window.</strong><div class="meta" style="margin-top:.5rem">Its
-           snapshot is older than the cluster's descriptor retention. Click <em>Run a
-           new case</em> below, then open it in the timeline — replay works on any
-           decision inside the window.</div></div>`;
-      const flipped = full.find(f => f.counterfactual && f.counterfactual.flipped);
-      if (flipped) {
-        const cf = flipped.counterfactual;
-        $('#flip').innerHTML = `<div class="flip">
-          <strong>The same intent, judged against today's memory, flips.</strong><br>
-          The agent proposed <code>${esc(cf.proposed)}</code>. Against the world it
-          saw, that was authorised as <code>${esc(cf.then)}</code>; against the world
-          today it would be <code>${esc(cf.now)}</code>.
-          <div class="meta" style="margin-top:.4rem">Authorisation is a pure function,
-          so this is recomputed exactly rather than estimated.</div>
-        </div>`;
-      }
-    } catch (e) {
-      $('#hero').innerHTML = `<div class="card" style="grid-column:1/-1"><strong>Could
-        not reconstruct the race.</strong><div class="meta" style="margin-top:.5rem">The
-        replay endpoint did not answer. The decisions themselves are in the timeline
-        below.</div></div>`;
-    }
-  } else {
-    $('#hero').innerHTML = `<div class="card" style="grid-column:1/-1"><strong>No
-      contended order in the recent timeline.</strong><div class="meta" style="margin-top:.5rem">The
-      hero needs one order with two decisions, one of which was forced to retry.
-      Click <em>Run a new case</em> below, then open it in the timeline.</div></div>`;
+      shown = await renderHero(raced.slice(0,2).reverse().map(d => d.decision_id));
+    } catch (e) { shown = false; }
   }
+  // Nothing to show is the expected state weeks into judging, not a bug: the
+  // seeded race falls out of the replay window and cannot be reconstructed.
+  // Offer to run a real one rather than explaining why the page is empty.
+  if (!shown) heroOffer(raced
+    ? `<strong>The recorded race is outside the replay window.</strong>
+       <div class="meta" style="margin-top:.5rem">Its snapshot is older than the
+       cluster's descriptor retention — on Cloud Basic the system descriptor
+       ranges keep the default and a tenant cannot raise them. The decisions are
+       still in the timeline; only the reconstruction is gone.</div>`
+    : `<strong>No contended order in the recent timeline.</strong>
+       <div class="meta" style="margin-top:.5rem">The hero needs one order
+       carrying two decisions with a serialization failure between them.</div>`);
 })();
+
+// Two of this system's failure modes return HTTP 200 while the product is
+// broken: the planner quietly abandoning the vector index, and replay becoming
+// unreachable while the configured retention still reads 90 days. Both are
+// probed against the cluster on every health call; this puts the answers where
+// someone can see them rather than leaving them in a JSON body.
+function renderOps(h){
+  const o = h.ops || {};
+  const yn = v => v === true ? 'yes' : v === false ? 'NO' : 'unknown';
+  const ms = v => v === undefined ? '—' : v + ' ms';
+  const rows = [
+    ['planner using the vector index', yn(o.vector_index_used),
+     'checked with EXPLAIN on a stored query vector, matched on index name'],
+    ['replay reachable now', yn(o.replay_reachable),
+     'an AS OF SYSTEM TIME read at the newest decision, not a config lookup'],
+    ['nearest-neighbour search', ms(o.recall_ms), `over ${h.cases} cases`],
+    ['replay probe', ms(o.replay_probe_ms), 'historical read round trip'],
+    ['round trip to the cluster', ms(o.probe_ms), 'SELECT 1 from this region'],
+    ['serialization retries recorded', o.serialization_retries ?? '—',
+     'decisions written after a 40001 — zero would mean the race proves nothing'],
+    ['refund actions written', o.actions ?? '—', 'one per authorised refund'],
+  ];
+  $('#ops').innerHTML = `<table style="width:100%">${rows.map(([k,v,note]) =>
+    `<tr><td style="padding:.2rem .8rem .2rem 0">${esc(k)}</td>
+     <td style="padding:.2rem .8rem .2rem 0"><b>${esc(v)}</b></td>
+     <td style="opacity:.7">${esc(note)}</td></tr>`).join('')}</table>`;
+}
+
+// Render the two-card hero from a pair of decision ids. Returns false if the
+// cluster can no longer reconstruct them, so the caller can offer a live race.
+async function renderHero(ids){
+  const full = await Promise.all(
+    ids.map(id => get('/api/replay?id=' + String(id).slice(0,8))));
+  const usable = full.filter(f => f.ok);
+  if (!usable.length) return false;
+  $('#hero').innerHTML = usable.map(renderSide).join('');
+  const flipped = full.find(f => f.counterfactual && f.counterfactual.flipped);
+  if (flipped) {
+    const cf = flipped.counterfactual;
+    $('#flip').innerHTML = `<div class="flip">
+      <strong>The same intent, judged against today's memory, flips.</strong><br>
+      The agent proposed <code>${esc(cf.proposed)}</code>. Against the world it
+      saw, that was authorised as <code>${esc(cf.then)}</code>; against the world
+      today it would be <code>${esc(cf.now)}</code>.
+      <div class="meta" style="margin-top:.4rem">Authorisation is a pure function,
+      so this is recomputed exactly rather than estimated.</div>
+    </div>`;
+  }
+  return true;
+}
+
+function heroOffer(explanation){
+  $('#hero').innerHTML = `<div class="card" style="grid-column:1/-1">
+    ${explanation}
+    <div style="margin-top:.9rem"><button id="rebuild">Race two agents now</button>
+      <span class="meta" id="rebuild-note" style="margin-left:.6rem"></span></div>
+    <div class="meta" style="margin-top:.5rem">Runs two agents at one fresh order
+      in real serializable transactions — the same code the recorded race used —
+      then reconstructs both from the write it just made.</div>
+  </div>`;
+  document.getElementById('rebuild').addEventListener('click', rebuildHero);
+}
+
+async function rebuildHero(ev){
+  const btn = ev.target, note = $('#rebuild-note');
+  btn.disabled = true;
+  note.textContent = 'two transactions racing…';
+  try {
+    const endpoint = window.LAMBDA_URL || '/api/run?mode=race';
+    const r = await (await fetch(endpoint, {
+      method:'POST',
+      headers:{'content-type':'application/json'},
+      body: JSON.stringify({mode:'race'})
+    })).json();
+    if (!r.ok || !(r.decision_ids||[]).length)
+      throw new Error(r.error || 'the race returned no decisions');
+    note.textContent = 'reconstructing…';
+    if (!await renderHero(r.decision_ids))
+      throw new Error('the new decisions did not reconstruct');
+  } catch (e) {
+    note.textContent = '';
+    btn.disabled = false;
+    $('#rebuild-note').textContent = String(e.message || e).slice(0,140);
+  }
+}
 
 function renderSide(r){
   const d = r.decision, then = r.then || {};

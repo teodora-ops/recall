@@ -88,8 +88,87 @@ def route_health() -> dict:
         secs = int(m.group(1)) if m else None
         body["retention_days"] = round(secs / 86400, 1) if secs else None
         body["replay_ok"] = bool(secs and secs >= 7776000)
+
+        body["ops"] = ops_report(cur)
     body["ok"] = True
     return body
+
+
+def ops_report(cur) -> dict:
+    """What an operator would actually want to know about this system.
+
+    Deliberately not a uptime ping. Recall has two failure modes that return
+    HTTP 200 while the product is broken:
+
+      * the vector index exists but the planner ignores it, and recall silently
+        degrades to a full scan that still returns rows;
+      * the configured MVCC retention looks right while replay is already
+        unreachable, because the binding constraint is the system descriptor
+        ranges rather than the tables.
+
+    Both are checked here against the live cluster rather than inferred from
+    configuration, because configuration is exactly what lies in both cases.
+    All of it is read-only, so the public reader can serve it.
+    """
+    out: dict = {}
+
+    t = time.time()
+    cur.execute("SELECT 1")
+    out["probe_ms"] = round((time.time() - t) * 1000, 1)
+
+    # Does the planner USE the index, or merely have one? Borrow a real stored
+    # query vector rather than synthesising one, so the plan is the plan a
+    # genuine recall produces.
+    try:
+        cur.execute("""SELECT query_embedding::STRING FROM decisions
+                       WHERE query_embedding IS NOT NULL
+                       ORDER BY decision_hlc DESC LIMIT 1""")
+        row = cur.fetchone()
+        if row:
+            t = time.time()
+            cur.execute("EXPLAIN SELECT case_id FROM cases "
+                        "ORDER BY embedding <-> %s LIMIT 5", (row[0],))
+            plan = "\n".join(r[0] for r in cur.fetchall())
+            out["explain_ms"] = round((time.time() - t) * 1000, 1)
+            out["vector_index_used"] = ("vector search" in plan
+                                        and "cases_embedding_idx" in plan)
+            t = time.time()
+            cur.execute("SELECT case_id FROM cases "
+                        "ORDER BY embedding <-> %s LIMIT 5", (row[0],))
+            cur.fetchall()
+            out["recall_ms"] = round((time.time() - t) * 1000, 1)
+    except Exception as e:  # noqa: BLE001
+        out["vector_index_used"] = None
+        out["vector_probe_error"] = f"{type(e).__name__}"
+
+    # Can replay actually reach the newest decision right now? This is the
+    # headline feature answering for itself.
+    try:
+        cur.execute("SELECT decision_hlc FROM decisions "
+                    "ORDER BY decision_hlc DESC LIMIT 1")
+        row = cur.fetchone()
+        if row:
+            # Interpolated because AS OF SYSTEM TIME rejects a placeholder, so
+            # it goes through the same validator every other replay path uses.
+            import txn
+            hlc = txn.validate_hlc(row[0])
+            t = time.time()
+            cur.execute(f"SELECT count(*) FROM decisions "  # noqa: S608
+                        f"AS OF SYSTEM TIME '{hlc}'")
+            cur.fetchone()
+            out["replay_probe_ms"] = round((time.time() - t) * 1000, 1)
+            out["replay_reachable"] = True
+    except Exception as e:  # noqa: BLE001
+        out["replay_reachable"] = False
+        out["replay_probe_error"] = str(e).splitlines()[0][:160]
+
+    # How often serializable actually bites. A zero here on a busy cluster
+    # would mean the race demo is not exercising what it claims to.
+    cur.execute("SELECT count(*) FROM decisions WHERE abort_sqlstate IS NOT NULL")
+    out["serialization_retries"] = cur.fetchone()[0]
+    cur.execute("SELECT count(*) FROM actions")
+    out["actions"] = cur.fetchone()[0]
+    return out
 
 
 def route_replay(qs: dict) -> tuple[int, dict]:
@@ -117,8 +196,12 @@ def route_replay(qs: dict) -> tuple[int, dict]:
                      "error": str(e)}
 
 
-def route_run() -> tuple[int, dict]:
+def route_run(mode: str = "single") -> tuple[int, dict]:
     """Run one agent turn live, on a throwaway order.
+
+    `mode="race"` instead runs two agents at the same throwaway order, which is
+    what rebuilds the hero once the seeded race has aged out of the replay
+    window. Same credential, same guarantee that ORD-4502 is never touched.
 
     Writes, so it needs a write credential — COCKROACH_WRITER_URL if one is
     configured, otherwise COCKROACH_URL. Reads elsewhere still go through the
@@ -137,7 +220,8 @@ def route_run() -> tuple[int, dict]:
     os.environ["COCKROACH_URL"] = writer
     try:
         import sandbox
-        return 200, {"ok": True, **sandbox.run()}
+        work = sandbox.run_race if mode == "race" else sandbox.run
+        return 200, {"ok": True, "mode": mode, **work()}
     finally:
         # Restore whatever the previous request left, so a following read still
         # goes through the reader.
@@ -161,7 +245,9 @@ class handler(BaseHTTPRequestHandler):
             or urlparse(self.path).path.rstrip("/").rsplit("/", 1)[-1]
         try:
             if route == "run":
-                status, body = route_run()
+                mode = (parse_qs(urlparse(self.path).query).get("mode")
+                        or ["single"])[0]
+                status, body = route_run("race" if mode == "race" else "single")
             else:
                 status, body = 404, {"ok": False, "error": f"no route {route!r}"}
         except Exception as e:  # noqa: BLE001
