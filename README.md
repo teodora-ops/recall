@@ -136,7 +136,7 @@ from `.env`.
 | Tool | How it is used |
 |---|---|
 | **Distributed vector indexing** | The corpus is a `VECTOR(1024)` column with a C-SPANN index. `explain_check.py` proves the planner *uses* it at real row counts — and that filtered variants fall off it, which is handled in Python rather than with a prefix column ([Evidence 1](#1-the-distributed-vector-index-accepts-vector1024--and-is-actually-used)) |
-| **Cloud managed MCP server** | `mcp.json` connects any MCP client — Claude Code, Cursor, VS Code — to the cluster at `https://cockroachlabs.cloud/mcp`. An analyst asks questions of the corpus, the decisions and the actions in natural language, including historical ones, because `AS OF SYSTEM TIME` works through it. Read-only by default, audit-logged, authenticated by a service account whose only role is exactly that ([Evidence 4d](#4d-analyst-access-over-mcp-read-only)) |
+| **Cloud managed MCP server** | `.mcp.json` connects any MCP client — Claude Code, Cursor, VS Code — to the cluster at `https://cockroachlabs.cloud/mcp`. An analyst asks questions of the corpus, the decisions and the actions in natural language, writing no SQL. Read-only by default, audit-logged, authenticated by a service account whose only role is exactly that. It pins its own read timestamp, so point-in-time reads are **not** reachable through it — `replay.py` uses a direct SQL connection for those, and the limitation is reported back in full ([Evidence 4d](#4d-analyst-access-over-the-cloud-managed-mcp-server)) |
 
 Beyond the tool list, the entry leans on three CockroachDB capabilities that have
 no equivalent in the Postgres + pgvector stack it would otherwise be:
@@ -851,6 +851,99 @@ five real cases, five real subjects, nothing obviously broken. It was only
 visible because the diff claimed all five results had *entered* the top five
 and five unrelated cases had *left* it. The vector is now read at present time
 and carried into the past.
+
+### 7. Rebuilding the hero live, once the recorded race has aged out
+
+The tables hold 90 days of MVCC history, but the *practical* replay window is
+the system-range GC window — CockroachDB's descriptor ranges keep the cluster
+default, and a non-system tenant cannot raise them (*"non-system tenants cannot
+configure zone for system range"*). So the seeded race stops reconstructing
+long before judging ends, and the page that leads on *"why did the agent decide
+that?"* would be left explaining an empty screen.
+
+`sandbox.run_race()` closes that gap. The existing single-agent `run()` cannot:
+the hero needs one order carrying **two** decisions with a `40001` between them,
+and one agent alone never produces a conflict. So the sandbox races two agents
+at a throwaway order using the same `threading.Barrier` interleave `race.py`
+uses, and the page falls back to it whenever the recorded race is out of range.
+
+`POST {"mode": "race"}` to the Lambda — or `/api/run?mode=race` — returns:
+
+```json
+{
+  "ok": true,
+  "mode": "race",
+  "order_id": "SANDBOX-de4672c0",
+  "item": "Set of four stoneware mugs",
+  "amount_minor": 3498,
+  "kinds": ["refund_full", "decline_already_refunded"],
+  "attempts": [2, 2],
+  "saw_serialization_failure": true,
+  "actions_written": 1,
+  "paid_minor": "3498",
+  "order_refunded_minor": 3498,
+  "paid_once": true,
+  "isolation": "serializable",
+  "model_called": false,
+  "ms": 6710
+}
+```
+
+Real transactions and a real conflict, on AWS Lambda, in 6.7 seconds: both
+agents forced to retry, one refund authorised, **one** action written, £34.98
+out against a £34.98 order.
+
+**`model_called: false` is not a caveat hidden in a footnote — it is in the API
+response and on the page.** The rationale strings on this path are pre-written;
+the serializable transaction, the policy gate and the replay anchor are real.
+The distinction matters because everything this project claims lives in the
+second list, and a demo that blurred the two would be claiming the wrong thing.
+
+**The seeded story still outranks it.** ORD-4502 is preferred whenever it is
+still reconstructable; the live race is the fallback, not the default. A judge
+arriving after the window has passed is offered *"Race two agents now"* rather
+than an explanation of why the screen is empty.
+
+### 8. Observability — the two failures that still return HTTP 200
+
+A health check that proves connectivity proves almost nothing here. Two things
+can break while every request still returns 200 and the page still renders:
+
+1. **The planner silently stops using the vector index.** An index that exists
+   but is ignored in favour of a full scan passes every naive check — the rows
+   still come back, only slower and by a different path.
+2. **Replay stops being reachable.** GC passes the timestamps, and the headline
+   capability starts returning `batch timestamp must be after replica GC
+   threshold` — weeks after anyone last looked.
+
+So `/api/health` carries an `ops` block that probes both, as the read-only user:
+
+```json
+"ops": {
+  "probe_ms": 77.5,
+  "explain_ms": 79.0,
+  "vector_index_used": true,
+  "recall_ms": 84.4,
+  "replay_probe_ms": 79.8,
+  "replay_reachable": true,
+  "serialization_retries": 7,
+  "actions": 17
+}
+```
+
+**`vector_index_used` runs `EXPLAIN` and matches on the index name**, rather than
+asking whether an index exists. That is the only check that distinguishes "the
+index is there" from "the planner is using it", and it is the one that fails
+quietly.
+
+**`replay_reachable` performs a real historical read**, not a zone-config
+lookup. Retention configured and retention *usable* are different claims, and
+only the second one matters to someone opening the demo in September.
+
+`serialization_retries` and `actions` are cumulative counters over the corpus —
+the number of decisions that hit a `40001` and re-decided, and the number of
+refunds actually authorised. Surfaced on the page as the **index in use** badge
+and the Operations panel.
 
 ---
 
