@@ -16,7 +16,8 @@ fact. Two of the four capabilities below do not survive being ported to
 Postgres + pgvector, and those are the two the project is built around.
 
 **Live:** [recall-memory.vercel.app](https://recall-memory.vercel.app) ·
-health check at [`/api/health`](https://recall-memory.vercel.app/api/health)
+health check at [`/api/health`](https://recall-memory.vercel.app/api/health) ·
+**[three-minute demo video](https://youtu.be/2MQ1fTF84Yg)**
 
 > Status: **all four capabilities working**, each with reproducible
 > evidence below. Semantic recall, the transactional race and point-in-time
@@ -79,6 +80,12 @@ database. They get protected ahead of everything else.
 
 ## Architecture
 
+![Recall architecture — three channels into an agent turn on AWS Lambda, Bedrock
+for embeddings and reasoning, S3 for artifacts, and CockroachDB holding cases,
+decisions and actions, read back by the demo page and an MCP analyst client](docs/architecture.png)
+
+The same thing as text:
+
 ```
    email ─┐
 whatsapp ─┼─→  agent  ───────────────→  Bedrock Nova Pro     (reasoning)
@@ -86,7 +93,7 @@ whatsapp ─┼─→  agent  ───────────────→  
                      │                  S3                   (case artifacts)
                      ↓
               CockroachDB Cloud  ── cases + C-SPANN vector index
-              (eu-west-2, v26.2.1)   customers, orders,
+              (eu-west-2, v26.2.5)   customers, orders,
                                      decisions + actions
                      │
                      ├─→  AS OF SYSTEM TIME  ──→  replay UI (Vercel)
@@ -95,7 +102,7 @@ whatsapp ─┼─→  agent  ───────────────→  
 
 | Layer | Choice |
 |---|---|
-| Database | CockroachDB Cloud (Basic), cluster `recall`, v26.2.1 |
+| Database | CockroachDB Cloud (Basic), cluster `recall`, v26.2.5 |
 | Region | eu-west-2 (London), everything |
 | Reasoning | Amazon Bedrock, Nova Pro, via the Converse API |
 | Embeddings | Amazon Bedrock, Titan Text Embeddings v2, 1024 dims |
